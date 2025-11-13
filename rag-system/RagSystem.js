@@ -723,10 +723,54 @@ class NITJSRRAGSystem {
       throw error;
     }
   }
-/**
- * Format conversation history for context
- * Limits token usage while preserving important context
- */
+
+  /**
+   * Filter sources by minimum relevance score and remove duplicates
+   * @param {Array} sources - Array of source objects with score property
+   * @param {number} minScore - Minimum relevance score (default 0.40 = 40%)
+   * @returns {Array} Filtered and deduplicated sources
+   */
+  _filterAndDeduplicateSources(sources, minScore = 0.40) {
+    if (!Array.isArray(sources) || sources.length === 0) {
+      return [];
+    }
+
+    const relevantSources = sources.filter(source => {
+      const score = source.score || 0;
+      return score >= minScore;
+    });
+
+    console.log(`[SourceFilter] Filtered ${sources.length} → ${relevantSources.length} sources (min score: ${minScore})`);
+
+    if (relevantSources.length === 0) {
+      return [];
+    }
+
+    const seenUrls = new Set();
+    const deduplicated = [];
+
+    for (const source of relevantSources) {
+      const url = source.url || '';
+      if (!url || !seenUrls.has(url)) {
+        if (url) seenUrls.add(url);
+        deduplicated.push(source);
+      } else {
+        console.log(`[SourceFilter] Skipped duplicate URL: ${url}`);
+      }
+    }
+
+    console.log(`[SourceFilter] Removed ${relevantSources.length - deduplicated.length} duplicate sources`);
+    
+    deduplicated.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    return deduplicated;
+  }
+
+
+  /**
+   * Format conversation history for context
+   * Limits token usage while preserving important context
+   */
   _formatConversationHistory(history, maxTurns = 5) {
     if (!Array.isArray(history) || history.length === 0) {
       return '';
@@ -969,9 +1013,13 @@ class NITJSRRAGSystem {
         });
       });
 
+      const filteredSources = this._filterAndDeduplicateSources(enhancedSources, 0.50);
+
+
+
       return {
         answer: fullText,
-        sources: enhancedSources,
+        sources: filteredSources,
         relevantLinks,
         confidence: relevantDocs.length > 0 ? relevantDocs[0].score : 0,
       };
