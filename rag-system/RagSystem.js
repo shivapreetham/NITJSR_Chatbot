@@ -723,7 +723,89 @@ class NITJSRRAGSystem {
       throw error;
     }
   }
+/**
+ * Format conversation history for context
+ * Limits token usage while preserving important context
+ */
+  _formatConversationHistory(history, maxTurns = 5) {
+    if (!Array.isArray(history) || history.length === 0) {
+      return '';
+    }
 
+    // Take last N conversation turns (*2 because each turn has user + assistant)
+    const recentHistory = history.slice(-maxTurns * 2);
+    
+    if (recentHistory.length === 0) {
+      return '';
+    }
+
+    const formatted = recentHistory
+      .map((msg) => {
+        const role = (msg.role || 'user').toUpperCase();
+        const content = String(msg.content || '').trim();
+        return content ? `${role}: ${content}` : '';
+      })
+      .filter(Boolean)
+      .join('\n');
+
+    return formatted ? `\n\nPrevious Conversation:\n${formatted}\n` : '';
+  }
+
+  /**
+   * Build enhanced prompt with conversation context and better instructions
+   */
+  _buildContextualPrompt(question, context, linksContext, history) {
+    const historySection = this._formatConversationHistory(history, 5);
+    
+    const prompt = `You are an AI assistant specializing in NIT Jamshedpur information. Your role is to provide accurate, helpful, and contextually aware responses based on the provided data and conversation history.
+
+  ${historySection}
+  Context from Database:
+  ${context || "No relevant context found."}
+  ${linksContext}
+
+  Current Question: ${question}
+
+  Instructions:
+
+  Context Awareness:
+  - Use the conversation history above to understand the full context
+  - If this question references previous messages (e.g., "tell me more", "what about that", "its placement"), look at the history to understand what the user is referring to
+  - Maintain consistency with your previous responses in this conversation
+  - Resolve pronouns (it, that, those, etc.) using conversation history
+
+  Answer Guidelines:
+  - Answer based primarily on the provided context from the database
+  - Be comprehensive but well-structured - use paragraphs, not walls of text
+  - Provide specific data points when available:
+    * Package amounts (e.g., "Average CTC: ₹8.5 LPA")
+    * Percentages (e.g., "95% placement rate")
+    * Company names (list specific companies when available)
+    * Year/timeframe for statistics
+  - If the context doesn't contain enough information, clearly state: "I don't have specific information about [topic] in my current data"
+
+  Links and Sources:
+  - When relevant links are available, naturally incorporate them in your response
+  - For PDF documents, format as: "You can find detailed information in the [Document Name] (PDF): [URL]"
+  - For web pages, format as: "Visit the [Page Title]: [URL]"
+  - Include direct URLs when they would be helpful to the user
+
+  Formatting:
+  - Use clear structure with proper paragraphs
+  - Bold important information using **text**
+  - Use bullet points for lists when appropriate
+  - Keep tone professional yet friendly
+  - No markdown headers (#, ##) - use bold text instead
+
+  Follow-up Handling:
+  - For vague follow-ups like "tell me more" or "what else", expand on the most recent topic from history
+  - For pronoun references like "it" or "that", identify the subject from previous messages
+  - If you're unsure what a pronoun refers to, ask for clarification
+
+  Answer:`;
+    
+    return prompt;
+  }
   async chatStream(question, precomputedEmbedding = null, onChunk = null, history = []) {
     try {
       const questionEmbedding =
@@ -740,7 +822,9 @@ class NITJSRRAGSystem {
           `[EmbeddingCache] stats hits=${ecStats.hits} misses=${ecStats.misses} backend=${ecStats.backend}`
         );
       } catch (_) {}
-
+      if (history.length > 0) {
+        const lastMsg = history[history.length - 1];
+      }
       const relevantDocs = await this.queryDocuments(
         question,
         8,
@@ -795,40 +879,45 @@ class NITJSRRAGSystem {
       )
       .join("\n")}`
           : "";
+      const prompt = this._buildContextualPrompt(
+        question,
+        context,
+        linksContext,
+        history
+      );
+    //   const historyText =
+    //     Array.isArray(history) && history.length
+    //       ? history
+    //           .map((m) => `${(m.role || "user").toUpperCase()}: ${String(m.content ?? "")}`)
+    //           .join("\n")
+    //       : "No prior conversation.";
 
-      const historyText =
-        Array.isArray(history) && history.length
-          ? history
-              .map((m) => `${(m.role || "user").toUpperCase()}: ${String(m.content ?? "")}`)
-              .join("\n")
-          : "No prior conversation.";
+    //   const prompt = `You are an AI assistant specializing in NIT Jamshedpur information. Use the provided context to answer questions accurately and helpfully.
 
-      const prompt = `You are an AI assistant specializing in NIT Jamshedpur information. Use the provided context to answer questions accurately and helpfully.
+    // Conversation so far:
+    // ${historyText}
 
-    Conversation so far:
-    ${historyText}
+    // Context:
 
-    Context:
+    // ${context || "No relevant context found."}${linksContext}
 
-    ${context || "No relevant context found."}${linksContext}
+    // Question: ${question}
 
-    Question: ${question}
+    // Instructions:
 
-    Instructions:
+    // - Answer based primarily on the provided context
+    // - If the context doesn't contain enough information, state that clearly
+    // - Keep answers consistent with earlier messages from the same user
+    // - Provide specific data points when available (percentages, package amounts, company names)
+    // - Be comprehensive but well-structured
+    // - When mentioning statistics, provide the source or timeframe when available
+    // - If relevant links are available, mention them in your response
+    // - For PDF documents, specify the document name and that it's a PDF
+    // - Include direct URLs when they would be helpful to the user
+    // - Format your response clearly with proper structure
+    // - If asked about documents or PDFs, provide the actual links when available
 
-    - Answer based primarily on the provided context
-    - If the context doesn't contain enough information, state that clearly
-    - Keep answers consistent with earlier messages from the same user
-    - Provide specific data points when available (percentages, package amounts, company names)
-    - Be comprehensive but well-structured
-    - When mentioning statistics, provide the source or timeframe when available
-    - If relevant links are available, mention them in your response
-    - For PDF documents, specify the document name and that it's a PDF
-    - Include direct URLs when they would be helpful to the user
-    - Format your response clearly with proper structure
-    - If asked about documents or PDFs, provide the actual links when available
-
-    Answer:`;
+    // Answer:`;
 
       const streamResult = await this.chatModel.generateContentStream(prompt);
 
@@ -892,12 +981,10 @@ class NITJSRRAGSystem {
     }
   }
 
-  // RagSystem.js — replace your getIndexStats() with this minimal fix
   async getIndexStats() {
     try {
       const stats = await this.index.describeIndexStats({});
 
-      // NEW: derive total from supported fields
       const totalFromNamespaces = Object.values(stats?.namespaces ?? {}).reduce(
         (sum, ns) => sum + (ns?.vectorCount ?? 0),
         0
