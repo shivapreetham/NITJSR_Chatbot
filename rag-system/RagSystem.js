@@ -190,7 +190,7 @@ class NITJSRRAGSystem {
 
 
     buildLinkDatabase(scrapedData) {
-        console.log("🔗 Building comprehensive link database...");
+        console.log("Building comprehensive link database...");
 
         if (scrapedData.links) {
             // PDF links
@@ -269,7 +269,7 @@ class NITJSRRAGSystem {
             await this.initialize();
         }
 
-        this.buildLinkDatabase(scrapedData);
+    this.buildLinkDatabase(scrapedData);
 
         if (!this.mongoAvailable()) {
             if (preview) {
@@ -734,246 +734,338 @@ class NITJSRRAGSystem {
         }
     }
 
+  /**
+   * Filter sources by minimum relevance score and remove duplicates
+   * @param {Array} sources - Array of source objects with score property
+   * @param {number} minScore - Minimum relevance score (default 0.40 = 40%)
+   * @returns {Array} Filtered and deduplicated sources
+   */
+  _filterAndDeduplicateSources(sources, minScore = 0.40) {
+    if (!Array.isArray(sources) || sources.length === 0) {
+      return [];
+    }
 
-    async chatStream(
-        question,
-        precomputedEmbedding = null,
-        onChunk = null,
-        history = [],
-        language
-    ) {
-        try {
-            const questionEmbedding =
-                precomputedEmbedding ||
-                (await this.embeddingCache.getQueryEmbedding(
-                    question,
-                    async (q) => await this.embeddings.embedQuery(q)
-                ));
+    const relevantSources = sources.filter(source => {
+      const score = source.score || 0;
+      return score >= minScore;
+    });
 
-            try {
-                const ecStats = this.embeddingCache.getStats();
-                console.log(
-                    `[EmbeddingCache] stats hits=${ecStats.hits} misses=${ecStats.misses} backend=${ecStats.backend}`
-                );
-            } catch (_) {}
+    console.log(`[SourceFilter] Filtered ${sources.length} → ${relevantSources.length} sources (min score: ${minScore})`);
 
-            const relevantDocs = await this.queryDocuments(
-                question,
-                8,
-                questionEmbedding
-            );
+    if (relevantSources.length === 0) {
+      return [];
+    }
 
-            if (relevantDocs.length === 0) {
-                const fallback =
-                    language === 'hindi'
-                        ? "मेरे पास उस विषय के बारे में विशिष्ट जानकारी नहीं है। क्या आप कृपया अपना प्रश्न दोबारा बता सकते हैं या प्लेसमेंट, शिक्षाविदों, संकाय, विभागों या अन्य कॉलेज से संबंधित विषयों के बारे में पूछ सकते हैं?"
-                        : "I don't have specific information about that topic in the NIT Jamshedpur data. Could you please rephrase your question or ask about placements, academics, faculty, departments, or other college-related topics?";
+    const seenUrls = new Set();
+    const deduplicated = [];
 
-                if (typeof onChunk === "function") {
-                    try {
-                        onChunk(fallback);
-                    } catch (_) {}
-                }
+    for (const source of relevantSources) {
+      const url = source.url || '';
+      if (!url || !seenUrls.has(url)) {
+        if (url) seenUrls.add(url);
+        deduplicated.push(source);
+      } else {
+        console.log(`[SourceFilter] Skipped duplicate URL: ${url}`);
+      }
+    }
 
-                return {
-                    answer: fallback,
-                    sources: [],
-                    relevantLinks: [],
-                    confidence: 0,
-                    language: language,
-                };
-            }
+    console.log(`[SourceFilter] Removed ${relevantSources.length - deduplicated.length} duplicate sources`);
 
-            const relevantLinks = this.findRelevantLinks(question, relevantDocs);
+    deduplicated.sort((a, b) => (b.score || 0) - (a.score || 0));
 
-            const context = relevantDocs
-                .map((doc, index) => {
-                    const sourceInfo =
-                        doc.metadata.sourceType === "pdf_document"
-                            ? `[PDF Document ${index + 1}: ${doc.metadata.title} (${
-                                doc.metadata.pages
-                            } pages)]`
-                            : `[Page ${index + 1}: ${doc.metadata.title}]`;
+    return deduplicated;
+  }
 
-                    return `${sourceInfo} ${doc.text}`;
-                })
-                .join("\n\n");
 
-            const linksContext =
-                relevantLinks.length > 0
-                    ? `
+  /**
+   * Format conversation history for context
+   * Limits token usage while preserving important context
+   */
+  // _formatConversationHistory(history, maxTurns = 5) {
+  //   if (!Array.isArray(history) || history.length === 0) {
+  //     return '';
+  //   }
+  //
+  //   // Take last N conversation turns (*2 because each turn has user + assistant)
+  //   const recentHistory = history.slice(-maxTurns * 2);
+  //
+  //   if (recentHistory.length === 0) {
+  //     return '';
+  //   }
+  //
+  //   const formatted = recentHistory
+  //       .map((msg) => {
+  //         const role = (msg.role || 'user').toUpperCase();
+  //         const content = String(msg.content || '').trim();
+  //         return content ? `${role}: ${content}` : '';
+  //       })
+  //       .filter(Boolean)
+  //       .join('\n');
+  //
+  //   return formatted ? `\n\nPrevious Conversation:\n${formatted}\n` : '';
+  // }
 
+  // /**
+  //  * Build enhanced prompt with conversation context and better instructions
+  //  */
+  // _buildContextualPrompt(question, context, linksContext, history) {
+  //   const historySection = this._formatConversationHistory(history, 5);
+  //
+  //   const prompt = `You are an AI assistant specializing in NIT Jamshedpur information. Your role is to provide accurate, helpful, and contextually aware responses based on the provided data and conversation history.
+  //
+  // ${historySection}
+  // Context from Database:
+  // ${context || "No relevant context found."}
+  // ${linksContext}
+  //
+  // Current Question: ${question}
+  //
+  // Instructions:
+  //
+  // Context Awareness:
+  // - Use the conversation history above to understand the full context
+  // - If this question references previous messages (e.g., "tell me more", "what about that", "its placement"), look at the history to understand what the user is referring to
+  // - Maintain consistency with your previous responses in this conversation
+  // - Resolve pronouns (it, that, those, etc.) using conversation history
+  //
+  // Answer Guidelines:
+  // - Answer based primarily on the provided context from the database
+  // - Be comprehensive but well-structured - use paragraphs, not walls of text
+  // - Provide specific data points when available:
+  //   * Package amounts (e.g., "Average CTC: ₹8.5 LPA")
+  //   * Percentages (e.g., "95% placement rate")
+  //   * Company names (list specific companies when available)
+  //   * Year/timeframe for statistics
+  // - If the context doesn't contain enough information, clearly state: "I don't have specific information about [topic] in my current data"
+  //
+  // Links and Sources:
+  // - When relevant links are available, naturally incorporate them in your response
+  // - For PDF documents, format as: "You can find detailed information in the [Document Name] (PDF): [URL]"
+  // - For web pages, format as: "Visit the [Page Title]: [URL]"
+  // - Include direct URLs when they would be helpful to the user
+  //
+  // Formatting:
+  // - Use clear structure with proper paragraphs
+  // - Bold important information using **text**
+  // - Use bullet points for lists when appropriate
+  // - Keep tone professional yet friendly
+  // - No markdown headers (#, ##) - use bold text instead
+  //
+  // Follow-up Handling:
+  // - For vague follow-ups like "tell me more" or "what else", expand on the most recent topic from history
+  // - For pronoun references like "it" or "that", identify the subject from previous messages
+  // - If you're unsure what a pronoun refers to, ask for clarification
+  //
+  // Answer:`;
+  //
+  //   return prompt;
+  // }
+
+
+  async chatStream(
+      question,
+      precomputedEmbedding = null,
+      onChunk = null,
+      history = [],
+      language = "english"
+  ) {
+    try {
+      // 1️⃣ Generate or reuse embedding
+      const questionEmbedding =
+          precomputedEmbedding ||
+          (await this.embeddingCache.getQueryEmbedding(
+              question,
+              async (q) => await this.embeddings.embedQuery(q)
+          ));
+
+      try {
+        const ecStats = this.embeddingCache.getStats();
+        console.log(
+            `[EmbeddingCache] stats hits=${ecStats.hits} misses=${ecStats.misses} backend=${ecStats.backend}`
+        );
+      } catch (_) {}
+
+      const relevantDocs = await this.queryDocuments(question, 8, questionEmbedding);
+
+      if (relevantDocs.length === 0) {
+        const fallback =
+            language === "hindi"
+                ? "मेरे पास उस विषय के बारे में विशिष्ट जानकारी नहीं है। क्या आप कृपया अपना प्रश्न दोबारा बता सकते हैं या प्लेसमेंट, शिक्षाविदों, संकाय, विभागों या अन्य कॉलेज से संबंधित विषयों के बारे में पूछ सकते हैं?"
+                : "I don't have specific information about that topic in the NIT Jamshedpur data. Could you please rephrase your question or ask about placements, academics, faculty, departments, or other college-related topics?";
+
+        if (typeof onChunk === "function") {
+          try {
+            onChunk(fallback);
+          } catch (_) {}
+        }
+
+        return {
+          answer: fallback,
+          sources: [],
+          relevantLinks: [],
+          confidence: 0,
+          language,
+        };
+      }
+
+      // Gather links and build context
+      const relevantLinks = this.findRelevantLinks(question, relevantDocs);
+      const context = relevantDocs
+          .map((doc, index) => {
+            const sourceInfo =
+                doc.metadata.sourceType === "pdf_document"
+                    ? `[PDF Document ${index + 1}: ${doc.metadata.title} (${doc.metadata.pages} pages)]`
+                    : `[Page ${index + 1}: ${doc.metadata.title}]`;
+
+            return `${sourceInfo} ${doc.text}`;
+          })
+          .join("\n\n");
+
+      const linksContext =
+          relevantLinks.length > 0
+              ? `
 Relevant Links Available:
 ${relevantLinks
-                        .map(
-                            (link) =>
-                                `• ${link.text}: ${link.url} ${
-                                    link.type === "pdf" ? "(PDF Document)" : "(Web Page)"
-                                }`
-                        )
-                        .join("\n")}`
-                    : "";
+                  .map(
+                      (link) =>
+                          `• ${link.text}: ${link.url} ${
+                              link.type === "pdf" ? "(PDF Document)" : "(Web Page)"
+                          }`
+                  )
+                  .join("\n")}`
+              : "";
 
-            // Build conversation history
-            const buildConversationHistory = (history) => {
-                if (!Array.isArray(history) || history.length === 0) {
-                    return '';
-                }
+      const languageInstruction = getLanguageInstruction(language);
 
-                const recentHistory = history.slice(-8);
+      const formatConversationHistory = (history, maxTurns = 5) => {
+        if (!Array.isArray(history) || history.length === 0) return "";
+        const recent = history.slice(-maxTurns * 2);
+        const formatted = recent
+            .map((msg) => {
+              const role = msg.role === "user" ? "User" : "Assistant";
+              return `${role}: ${String(msg.content || "").trim()}`;
+            })
+            .join("\n");
+        return formatted ? `\n\nPrevious Conversation:\n${formatted}\n` : "";
+      };
 
-                const formattedHistory = recentHistory
-                    .map((msg) => {
-                        const role = msg.role === 'user' ? 'User' : 'Assistant';
-                        const content = String(msg.content || '').trim();
-                        return `${role}: ${content}`;
-                    })
-                    .join('\n');
+      const historySection = formatConversationHistory(history);
 
-                return `
+      const prompt = `
+You are an AI assistant specializing in NIT Jamshedpur information. Your role is to provide accurate, helpful, and contextually aware responses based on the provided data and conversation history.
+${languageInstruction}
 
-CONVERSATION HISTORY:
-${formattedHistory}
+${historySection ? historySection : ""}
+
+Knowledge Base Context:
+${context || "No relevant context found."}
+${linksContext}
+
+Current Question: ${question}
+
+Instructions:
+
+Context Awareness:
+- Use the conversation history above to understand the full context.
+- If the question references previous messages (e.g., "tell me more", "what about that", "its placement"), resolve them from the conversation history.
+- Maintain consistency with earlier responses in this conversation.
+- Resolve pronouns like "it", "that", "this" using context.
+
+Answer Guidelines:
+- Base your answer primarily on the context from the database.
+- Provide specific data points (placement %, packages, companies, year, etc.) when available.
+- If context lacks information, clearly state that.
+- Be concise, professional, and structured.
+- When relevant links are available, mention them naturally.
+- For PDFs, say: "Refer to [Document Name] (PDF): [URL]"
+- For web pages, say: "See [Page Title]: [URL]"
+
+Formatting:
+- Use clear paragraphs.
+- Bold key points with **text**.
+- Use bullet points when appropriate.
+- Keep tone informative yet conversational.
+
+Follow-up Handling:
+- If user asks "tell me more" or similar, expand on the most recent topic.
+- If unsure what pronoun refers to, ask for clarification.
+
+Answer:
 `;
-            };
 
-            const conversationContext = buildConversationHistory(history);
-            const hasHistory = conversationContext.length > 0;
+      console.log(
+          `[Chat] Processing ${history.length} messages | Language: ${language}`
+      );
 
-            // Get language-specific instruction
-            const languageInstruction = getLanguageInstruction(language);
+      // 7️⃣ Generate streaming response
+      const streamResult = await this.chatModel.generateContentStream(prompt);
+      let fullText = "";
 
-            const prompt = `You are an AI assistant specializing in NIT Jamshedpur information. Use the provided context to answer questions accurately and helpfully.
-                                    ${languageInstruction}
-                                    ${conversationContext}
-                                    ${hasHistory ? `
-                                    IMPORTANT: The user's current question may be a follow-up to the conversation above. Consider the conversation history when interpreting the question and provide contextually relevant answers.
-                                    
-                                    Examples of follow-up patterns:
-                                    - If user asks "What about placements?", check if they previously asked about a specific department
-                                    - If user says "Tell me more", refer to the previous topic discussed
-                                    - If user asks "What are the requirements?", identify what they're asking requirements for based on context
-                                    - Pronouns like "it", "that", "this" often refer to topics in previous messages
-                                    ` : ''}
-                                    KNOWLEDGE BASE CONTEXT:
-                                    ${context || "No relevant context found."}${linksContext}
-                                    
-                                    CURRENT QUESTION: ${question}
-                                    ${languageInstruction}
-                                    
-                                    INSTRUCTIONS:
-                                    - Answer based on BOTH the knowledge base context AND the conversation history
-                                    - If this is a follow-up question, acknowledge what was discussed earlier
-                                    - If the current question uses pronouns or unclear references, resolve them using conversation history
-                                    - Provide specific data points when available (percentages, package amounts, company names)
-                                    - Keep answers consistent with your earlier responses in this conversation
-                                    - Be comprehensive but well-structured
-                                    - When mentioning statistics, provide the source or timeframe when available
-                                    - If relevant links are available, mention them in your response
-                                    - For PDF documents, specify the document name and that it's a PDF
-                                    - Include direct URLs when they would be helpful to the user
-                                    - Format your response clearly with proper structure
-                                    - If asked about documents or PDFs, provide the actual links when available
-                                    ${hasHistory ? '- Reference previous messages naturally when relevant (e.g., "As I mentioned earlier about X...")\n' : ''}
-                                    ANSWER:`;
-
-            console.log(prompt);
-            console.log(`[Chat] Processing with ${history.length} history messages${hasHistory ? ' (using context)' : ' (fresh conversation)'} in language: ${language}`);
-
-            const streamResult = await this.chatModel.generateContentStream(prompt);
-
-            let fullText = "";
-
-            if (streamResult?.stream) {
-                for await (const chunk of streamResult.stream) {
-                    const part =
-                        typeof chunk?.text === "function" ? chunk.text() : chunk?.text;
-
-                    if (part) {
-                        fullText += part;
-
-                        if (typeof onChunk === "function") {
-                            try {
-                                onChunk(part);
-                            } catch (_) {}
-                        }
-                    }
-                }
+      if (streamResult?.stream) {
+        for await (const chunk of streamResult.stream) {
+          const part =
+              typeof chunk?.text === "function" ? chunk.text() : chunk?.text;
+          if (part) {
+            fullText += part;
+            if (typeof onChunk === "function") {
+              try {
+                onChunk(part);
+              } catch (_) {}
             }
-
-            if (!fullText && streamResult?.response) {
-                try {
-                    fullText = (await streamResult.response).text() || "";
-                } catch (_) {}
-            }
-
-            const enhancedSources = relevantDocs.map((doc) => ({
-                text: doc.text.substring(0, 200) + "...",
-                source: doc.metadata.source,
-                sourceType: doc.metadata.sourceType,
-                url: doc.metadata.url,
-                title: doc.metadata.title,
-                score: doc.score,
-                pages: doc.metadata.pages,
-                category: doc.metadata.category,
-            }));
-
-            relevantLinks.forEach((link) => {
-                enhancedSources.push({
-                    text: link.context || link.text,
-                    source: link.type,
-                    sourceType: "link",
-                    url: link.url,
-                    title: link.text,
-                    score: 0.8,
-                    category: "link",
-                });
-            });
-
-            return {
-                answer: fullText,
-                sources: enhancedSources,
-                relevantLinks,
-                confidence: relevantDocs.length > 0 ? relevantDocs[0].score : 0,
-                usedHistory: hasHistory,
-                historyLength: history.length,
-                language: language,
-            };
-        } catch (error) {
-            console.error("Chat stream error:", error.message);
-            throw error;
+          }
         }
-    }
+      }
 
-
-    async getIndexStats() {
+      if (!fullText && streamResult?.response) {
         try {
-            const stats = await this.index.describeIndexStats({});
+          fullText = (await streamResult.response).text() || "";
+        } catch (_) {}
+      }
 
-            const totalFromNamespaces = Object.values(stats?.namespaces ?? {}).reduce(
-                (sum, ns) => sum + (ns?.vectorCount ?? 0),
-                0
-            );
+      const enhancedSources = relevantDocs.map((doc) => ({
+        text: doc.text.substring(0, 200) + "...",
+        source: doc.metadata.source,
+        sourceType: doc.metadata.sourceType,
+        url: doc.metadata.url,
+        title: doc.metadata.title,
+        score: doc.score,
+        pages: doc.metadata.pages,
+        category: doc.metadata.category,
+      }));
 
-            const totalVectors =
-                typeof stats?.totalRecordCount === "number"
-                    ? stats.totalRecordCount
-                    : totalFromNamespaces;
+      relevantLinks.forEach((link) => {
+        enhancedSources.push({
+          text: link.context || link.text,
+          source: link.type,
+          sourceType: "link",
+          url: link.url,
+          title: link.text,
+          score: 0.8,
+          category: "link",
+        });
+      });
 
-            return {
-                totalVectors,
-                dimension: stats?.dimension ?? 1024,
-                indexFullness: stats?.indexFullness ?? 0,
-                linkDatabaseSize: this.linkDatabase?.size ?? 0,
-            };
-        } catch (error) {
-            console.error("❌ Error getting index stats:", error.message || error);
-            return { totalVectors: 0, error: String(error?.message || error) };
-        }
+      const filteredSources = this._filterAndDeduplicateSources(
+          enhancedSources,
+          0.5
+      );
+
+      return {
+        answer: fullText,
+        sources: filteredSources,
+        relevantLinks,
+        confidence: relevantDocs.length > 0 ? relevantDocs[0].score : 0,
+        language,
+      };
+    } catch (error) {
+      console.error("⚠️ Chat stream error:", error.message);
+      throw error;
     }
+  }
 
 
-    async clearIndex() {
+
+  async clearIndex() {
         console.log("Clearing Pinecone index and link database...");
         try {
             await this.index.deleteAll();
