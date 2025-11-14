@@ -1,30 +1,12 @@
-# NIT Jamshedpur RAG Chatbot
-# NIT Jamshedpur RAG Chatbot
+# Chatbot for NIT Jamshedpur
 
 AI assistant that answers questions about NIT Jamshedpur using Retrieval‑Augmented Generation (RAG). It crawls the official website, extracts and embeds content, and serves accurate, source‑grounded answers with relevant links and streaming responses.
 
-— Built for reliability, speed, and maintainability. Perfect for demos, interviews, and real users.
-
-
-**Why it stands out**
-- End‑to‑end RAG: scraper → embedding → vector search → streaming answers
-- Uses Google Gemini for generation and Cohere for embeddings
-- Vector search on Pinecone; MongoDB ledger for change tracking and safe re‑ingestion
-- Production‑minded: rate limiting, Redis caches, and SSE streaming
-- Smart scraper with Puppeteer + sitemap policy to prioritize fresh tenders/notices and PDFs
-
-
-**Live Experience (local)**
-- Chat UI: `http://localhost:3000/`
-- Admin/Docs page: `http://localhost:3000/admin`
-- Health: `http://localhost:3000/health`
-- Stats: `http://localhost:3000/stats`
-
-
 ## Overview
 
-The system implements a pragmatic RAG architecture tailored for the NIT Jamshedpur website:
+**What's going in inside**
 
+- RAG: scraper → embedding → vector search → streaming answers.
 - Scrape the site with Puppeteer, collect rich page content and PDF links, and persist snapshots under `scraped_data/`.
 - Chunk and embed with Cohere; store semantic vectors in Pinecone.
 - Maintain a change ledger in MongoDB (per URL content hash) to avoid duplicate work and to safely delete stale vectors.
@@ -120,6 +102,14 @@ RESPONSE_CACHE_MAX_CANDIDATES=200
 
 # Control auto‑initialization at boot
 AUTO_INIT=true
+
+# admin credentials
+JWT_SECRET=...
+ADMIN_PASSWORD=...
+ADMIN_USERNAME=...
+ADMIN_PASSWORD_HASH=...
+
+REACT_APP_API_URL=http://localhost:3000
 ```
 
 Run the core workflow
@@ -146,6 +136,13 @@ Run the core workflow
 - `GET /stats` — Summary including data files and cache stats
 - `GET /sources` — Overview of available scraped snapshots
 - `GET /links` — All discovered links (pdf, page, etc.) once initialized
+
+
+**Routes you can access locally**
+- Chat UI: `http://localhost:3000/`
+- Admin login page: `http://localhost:3000/admin/login`
+- Health: `http://localhost:3000/health`
+- Stats: `http://localhost:3000/stats`
 
 
 ## Data Flow
@@ -345,42 +342,3 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
 
 All endpoints return JSON. When `PORT` differs from 3000, update your curl/browser targets accordingly.
 
----
-
-## Repository layout
-```
-server.js            # Express server + REST API + startup orchestration
-scraper/scraper.js   # Puppeteer crawler (HTML discovery + JSON writer)
-scraper/processPdfs.js # Standalone PDF text/OCR processor for scraped snapshots
-rag-system/RagSystem.js # RAG pipeline (Gemini, Cohere, Pinecone, Mongo ledger, caches)
-scripts/             # CLI helpers: scrape, embed, serve
-caching/             # Embedding and response caches (Redis-backed with in-memory fallback)
-public/              # Frontend assets served at /
-scraped_data/        # Timestamped JSON snapshots from the scraper
-testScraper.js       # Standalone scrape tester
-docker-compose.yml   # Redis instance for local caching
-```
-
----
-
-## Operational notes
-- **MongoDB optional but recommended**: with it, `_ingestWithLedger` tracks URL hashes, updates only changed content, and prunes stale vectors from Pinecone.
-- **Redis optional**: improves latency by caching embeddings (`embeddingCache.js`) and full answers (`responseCache.js`). Without Redis the caches fall back to in-memory LRU storage and clear on restart.
-- **Scraper limits**: defaults to six pages and depth three when run via the server. Increase CLI limits gradually to avoid hammering the source site.
-- **Puppeteer dependencies**: the first `npm install` downloads Chromium. On headless servers set `PUPPETEER_SKIP_DOWNLOAD=true` and provide a Chrome/Chromium binary via `PUPPETEER_EXECUTABLE_PATH`.
-- **Handling large scrapes**: Pinecone writes happen in batches; monitor logs for rate-limit warnings. If memory usage climbs, lower `chunkSize` or `maxPages` or run scrapes in stages.
-- **Security**: never commit real `.env` values. Rotate API keys if they leak. Protect the Express app with auth, HTTPS, and rate limits before exposing it publicly.
-
----
-
-## Troubleshooting
-- `pdf-parse` errors -> ensure `test/data/05-versions-space.pdf` exists; reinstall dependencies; verify no system-level PDF tools are missing.
-- `MongoDB not connected` warnings -> check `MONGODB_URI`. Without Mongo the system still answers but change tracking and `/embed-latest` ledger logic are skipped.
-- `Pinecone index dimension` warning -> recreate the Pinecone index with dimension 1024 to match the Cohere model.
-- Gemini or Cohere failures -> confirm API keys and model names (`gemini-2.5-flash`, `embed-english-v3.0`). Network egress must be allowed.
-- Frontend stuck on "Initializing" -> confirm `/health` returns `initialized: true`. Otherwise POST `/initialize` or run `npm run embed` manually.
-- Slow repeated questions -> run Redis (`docker compose up redis`) so the response cache can persist between requests.
-
----
-
-Happy hacking! Once the stack runs locally you can tweak crawler limits, add new data sources, or swap providers as needed. `rag-system/RagSystem.js` centralizes most of the integration code and is the best starting point for deeper changes.
