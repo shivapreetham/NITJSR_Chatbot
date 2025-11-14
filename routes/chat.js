@@ -105,7 +105,6 @@ export function setupChatRoutes(app, server) {
     app.post(
         '/chat-stream',
         async (req, res, next) => {
-            // Rate limiting middleware
             if (!server._chatRateLimiter) {
                 const redis = await server.dbManager.connectRedis().catch(() => null);
                 server._chatRateLimiter = createRateLimiter({
