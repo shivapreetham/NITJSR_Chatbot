@@ -54,97 +54,6 @@ AI assistant that answers questions about NIT Jamshedpur using Retrieval‑Augme
 - `scraped_data/` — persisted scrape snapshots (JSON)
 
 
-## Getting Started
-
-Prerequisites
-- Node.js 18+
-- Pinecone account (index with dimension 1024, cosine)
-- Cohere API key
-- Google Gemini API key
-- MongoDB (recommended) for change ledger
-- Redis (optional) for durable caches
-
-Install
-- `npm install`
-
-Environment
-Create a `.env` file (do not commit secrets):
-
-```
-PORT=3000
-NODE_ENV=development
-
-# AI Providers
-GEMINI_API_KEY=...
-COHERE_API_KEY=...
-COHERE_EMBED_MODEL=embed-english-v3.0
-
-# Pinecone
-PINECONE_API_KEY=...
-PINECONE_ENVIRONMENT=us-east-1
-PINECONE_INDEX_NAME=nitjsrchatbot
-
-# MongoDB (recommended)
-MONGODB_URI=...
-MONGODB_DB=nitjsr_rag
-MONGO_PAGES_COLL=pages
-MONGO_CHUNKS_COLL=chunks
-
-# Redis (optional)
-REDIS_URL=redis://localhost:6379
-
-# Response cache tuning (optional)
-RESPONSE_CACHE_TTL_SECONDS=604800
-RESPONSE_CACHE_LSH_BITS=16
-RESPONSE_CACHE_LSH_RADIUS=1
-RESPONSE_CACHE_SIM_THRESHOLD=0.92
-RESPONSE_CACHE_MAX_CANDIDATES=200
-
-# Control auto‑initialization at boot
-AUTO_INIT=true
-
-# admin credentials
-JWT_SECRET=...
-ADMIN_PASSWORD=...
-ADMIN_USERNAME=...
-ADMIN_PASSWORD_HASH=...
-
-REACT_APP_API_URL=http://localhost:3000
-```
-
-Run the core workflow
-1) Scrape content
-- `npm run scrape -- --maxPages 100 --maxDepth 3 --delay 1500`
-  - Output JSON is saved to `scraped_data/`.
-2) Embed into Pinecone (requires MongoDB for the ledger path)
-- `npm run embed -- --latest`
-- `npm run embed -- --latest --force` (clears Pinecone first)
-3) Serve the chatbot
-- `npm run dev` (nodemon) or `npm start`
-- `npm run serve` to start without auto‑initialization (set `AUTO_INIT=false`)
-
-
-## Key Endpoints
-
-- `POST /initialize` — Validate env and initialize the RAG system
-- `POST /chat-stream` — Streamed chat responses (SSE). Send `{ question, sessionId }`
-- `POST /scrape` — Scrape website; accepts overrides like `maxPages`, `maxDepth`
-- `POST /scrape-and-embed` — Scrape then embed into Pinecone
-- `POST /embed-latest` — Embed the most recent snapshot from `scraped_data/`
-- `POST /reset-storage` — Clear Pinecone and Mongo collections
-- `GET /health` — Status, caches, index stats, Mongo status
-- `GET /stats` — Summary including data files and cache stats
-- `GET /sources` — Overview of available scraped snapshots
-- `GET /links` — All discovered links (pdf, page, etc.) once initialized
-
-
-**Routes you can access locally**
-- Chat UI: `http://localhost:3000/`
-- Admin login page: `http://localhost:3000/admin/login`
-- Health: `http://localhost:3000/health`
-- Stats: `http://localhost:3000/stats`
-
-
 ## Data Flow
 
 1) Discovery & Scrape
@@ -164,77 +73,10 @@ Run the core workflow
 - Response cache can short‑circuit if a highly similar question was answered recently.
 
 
-## Performance & Reliability
+## For setting up locally
 
-- Cohere embeddings cached to reduce model calls
-- Response cache uses LSH buckets in Redis or memory for fast approximate lookups
-- Mongo change ledger prevents duplicate embeddings and handles deletes
-- Rate limiter protects `/chat-stream` with Redis/memory backend
-- SSE streaming improves perceived latency for users
+### Prerequisites
 
-
-## Security & Deployment Notes
-
-- Never commit `.env` with secrets. Rotate leaked keys immediately.
-- Put the service behind HTTPS and a reverse proxy (e.g., NGINX); enable authentication on admin endpoints if exposed.
-- Pin Pinecone index to 1024 dimensions for Cohere v3; recreate if misconfigured.
-- Production: prefer Redis for caches and enable Mongo ledger; consider VPC‑peered services where available.
-
-
-## What Recruiters Should Notice
-
-- System thinking: end‑to‑end design from data acquisition to answer delivery
-- Practical tradeoffs: fast iteration, robust defaults, and operational safeguards
-- Clear separation of concerns: scraper, RAG core, caching, rate limiting, and UI
-- Maintainability: change‑ledger approach, metrics endpoints, and CLI scripts
-- Production empathy: caching layers, rate limiting, and graceful startup/shutdown
-
-
-## Roadmap (Next Steps)
-
-- Add evaluation harness for answer quality (groundedness, factuality)
-- Add auth and role‑based access for admin endpoints
-- Support hybrid retrieval (keyword + vector)
-- Improve PDF parsing pipeline and document chunking heuristics
-- Add observability (tracing and structured metrics)
-
-
-## Quick Commands
-
-- Install: `npm install`
-- Scrape: `npm run scrape -- --maxPages 100 --maxDepth 3`
-- Embed: `npm run embed -- --latest` (use `--force` to clear index)
-- Serve: `npm run dev` or `npm start`
-- No auto‑init: `npm run serve` (sets `AUTO_INIT=false`)
-
-
-## Credits
-
-- Google Generative AI (Gemini) for generation
-- Cohere + LangChain for embeddings
-- Pinecone for vector search
-- Puppeteer for scraping
-- Redis and MongoDB for caching and ledgering
-
-
-— If you’d like a tour of the codebase or a live demo, just ask. 
-
-Retrieval-Augmented Generation (RAG) stack for answering questions about NIT Jamshedpur.  
-The system scrapes the official institute website, chunks and embeds the content with Cohere, stores the vectors in Pinecone, and generates answers with Google Gemini.  
-Express serves a simple web UI and a JSON API, while optional Redis and MongoDB integrations speed up repeated queries and keep track of data changes.
-
----
-
-## What this project provides
-- Automated scraper that walks key sections of `https://nitjsr.ac.in`, extracts structured text, and parses linked PDFs.
-- Ingestion pipeline that deduplicates pages, builds stable chunk IDs, and pushes embeddings to Pinecone. A MongoDB "change ledger" records what changed across scrapes.
-- Chat endpoint that performs semantic search with cached Cohere embeddings, calls Gemini for grounded answers, and returns supporting sources plus relevant links.
-- Frontend (served from `public/`) that hits the REST API, displays status, and renders chat conversations.
-- Optional Redis layer for query/response caches to keep repeated questions fast.
-
----
-
-## Prerequisites
 - **Node.js 18+** (the stack uses ES Modules and Puppeteer's bundled Chromium build).
 - **npm** (installs dependencies and runs scripts).
 - Accounts and API keys for:
@@ -243,15 +85,16 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
   - Pinecone vector database (`PINECONE_API_KEY`, index name, environment)
 - **MongoDB** connection string (Atlas or self-hosted) if you want incremental ingestion and change tracking. Without it, the pipeline falls back to a legacy upsert path.
 - **Redis** (local or remote) if you want persistent caches. A local instance is enough for development; see `docker-compose.yml`.
-- Adequate disk space: `scraped_data/` holds timestamped JSON snapshots (~0.5 MB each with default scrape limits).
 
 ---
 
-## Initial setup
+### Initial setup
+
 1. **Install dependencies**
    ```bash
    npm install
    ```
+   
 2. **Create `.env`** (never commit real keys). At minimum:
    ```env
    # AI providers
@@ -269,18 +112,32 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
    AUTO_INIT=true
    INIT_SKIP_EMBED_IF_INDEX_NOT_EMPTY=true
 
-   # Optional services
+   # mongo & redis
    REDIS_URL=redis://localhost:6379/0
-   MONGODB_URI=mongodb://localhost:27017
+   MONGODB_URI=...
    MONGODB_DB=nitjsr_rag
    MONGO_PAGES_COLL=pages
    MONGO_CHUNKS_COLL=chunks
+
+   # admin credentials
+   JWT_SECRET=...
+   ADMIN_PASSWORD=...
+   ADMIN_USERNAME=...
+   ADMIN_PASSWORD_HASH=...
+    
+   REACT_APP_API_URL=http://localhost:3000
    ```
-   See `.env` in this repo for additional tunables (timeouts, demo settings, cache knobs).
-3. **Start supporting services (optional)**
+      
+4. **Start supporting services (optional)**
    - Redis: `docker compose up -d redis`
    - MongoDB: point `MONGODB_URI` to Atlas or run a local instance.
-4. **(One-time) fetch a sample PDF for pdf-parse (if Puppeteer struggles without it)**
+
+5. **Since the scraping and embedding routes are protected, you need to login as admin to access them**
+   - Fill the admin credentials in the .env
+   - Open `https://localhost:3001/admin/login` and login using your credentials.
+   - After succesfully logging in, you'll get access to the APIs.
+     
+6. **(One-time) fetch a sample PDF for pdf-parse (if Puppeteer struggles without it)**
    ```bash
    mkdir -p test/data
    curl -L "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf" \
@@ -289,7 +146,8 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
 
 ---
 
-## Typical workflow
+### Workflow
+
 1. **Scrape the website**
    ```bash
    npm run scrape -- --maxPages 100 --maxDepth 3 --delay 1500
@@ -310,7 +168,7 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
    - Production style (single start + auto-init): `npm start`
    - Serve-only, no auto init (useful if vectors are already in Pinecone): `npm run serve`
 
-   The server listens on `http://localhost:PORT` (3000 by default). The web UI and REST API share the same origin. If `AUTO_INIT=true`, startup runs `initializeSystem()` which pulls the latest scrape and embeds it unless Pinecone already has vectors and `INIT_SKIP_EMBED_IF_INDEX_NOT_EMPTY` is true.
+   The server listens on `http://localhost:PORT` (3001 by default). The web UI and REST API share the same origin. If `AUTO_INIT=true`, startup runs `initializeSystem()` which pulls the latest scrape and embeds it unless Pinecone already has vectors and `INIT_SKIP_EMBED_IF_INDEX_NOT_EMPTY` is true.
 
 4. **Chat / monitor**
    - Visit `http://localhost:PORT/` for the UI.
@@ -318,17 +176,7 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
 
 ---
 
-## npm scripts and utilities
-- `npm run scrape` -> launches `scripts/scrape.js`; accepts `--maxPages`, `--maxDepth`, `--delay`.
-- `npm run embed` -> runs `scripts/embed.js`; accepts `--latest`, `--file`, `--force`.
-- `npm run serve` -> starts the server with `AUTO_INIT=false` via `scripts/serve.js`.
-- `npm run dev` -> nodemon watch mode for `server.js`.
-- `npm run test:redis-emb-cache` / `npm run inspect:redis-emb-key` -> utilities for the embedding cache.
-- `node testScraper.js` -> small harness that scrapes a handful of pages and prints a verbose summary.
-
----
-
-## API surface (served from `server.js`)
+## API endpoints (served from ./routes/)
 - `GET /health` -> readiness info, cache stats, Pinecone totals, Mongo status.
 - `POST /initialize` -> validates env vars, loads the latest scrape (or creates a new one), embeds, and marks the system initialized.
 - `POST /embed-latest` -> reprocesses the newest file in `scraped_data/` and pushes vectors (requires Mongo for the ledger mode).
@@ -340,5 +188,12 @@ Express serves a simple web UI and a JSON API, while optional Redis and MongoDB 
 - `GET /links` -> flattened view of the link database (PDFs, internal pages) once the system is initialized.
 - `GET /test-gemini` / `GET /test-pinecone` -> connectivity probes for external services.
 
-All endpoints return JSON. When `PORT` differs from 3000, update your curl/browser targets accordingly.
+---
 
+## npm scripts and utilities
+- `npm run scrape` -> launches `scripts/scrape.js`; accepts `--maxPages`, `--maxDepth`, `--delay`.
+- `npm run embed` -> runs `scripts/embed.js`; accepts `--latest`, `--file`, `--force`.
+- `npm run serve` -> starts the server with `AUTO_INIT=false` via `scripts/serve.js`.
+- `npm run dev` -> nodemon watch mode for `server.js`.
+- `npm run test:redis-emb-cache` / `npm run inspect:redis-emb-key` -> utilities for the embedding cache.
+- `node testScraper.js` -> small harness that scrapes a handful of pages and prints a verbose summary.
