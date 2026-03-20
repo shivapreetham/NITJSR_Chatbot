@@ -35,6 +35,10 @@ export class ChatHistory {
     return `${this.namespace}:s:${sessionId}`;
   }
 
+  contextKey(sessionId) {
+    return `${this.namespace}:ctx:${sessionId}`;
+  }
+
   normalizeMessage(message = {}) {
     const roleInput = typeof message.role === 'string' ? message.role.toLowerCase() : 'user';
     const role = VALID_ROLES.has(roleInput) ? roleInput : 'user';
@@ -89,8 +93,57 @@ export class ChatHistory {
     if (!sessionId) return;
     if (this.backend === 'redis') {
       await this.redis.del(this.key(sessionId));
+      await this.redis.del(this.contextKey(sessionId));
     } else {
       this.lru.delete(sessionId);
+      this.lru.delete(`ctx:${sessionId}`);
     }
+  }
+
+  async setUserContext(sessionId, context) {
+    if (!sessionId) return;
+    const contextData = {
+      department: context.department || null,
+      year: context.year || null,
+      interests: Array.isArray(context.interests) ? context.interests : [],
+      role: context.role || 'student',
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (this.backend === 'redis') {
+      const key = this.contextKey(sessionId);
+      await this.redis.set(key, JSON.stringify(contextData));
+      if (this.sessionTtlSeconds > 0) {
+        await this.redis.expire(key, this.sessionTtlSeconds);
+      }
+    } else {
+      this.lru.set(`ctx:${sessionId}`, contextData);
+    }
+  }
+
+  async getUserContext(sessionId) {
+    if (!sessionId) return null;
+    if (this.backend === 'redis') {
+      const key = this.contextKey(sessionId);
+      const raw = await this.redis.get(key);
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+    return this.lru.get(`ctx:${sessionId}`) || null;
+  }
+
+  async updateUserContext(sessionId, partialContext) {
+    if (!sessionId) return;
+    const existing = await this.getUserContext(sessionId) || {};
+    const updated = {
+      ...existing,
+      ...partialContext,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.setUserContext(sessionId, updated);
   }
 }
