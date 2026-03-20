@@ -6,6 +6,7 @@ import { CohereEmbeddings } from "@langchain/cohere";
 import { EmbeddingCache } from "../caching/embeddingCache.js";
 import { hashString, makeChunkId, nowIso, countWords } from "./ragUtils.js";
 import { prepareIngestionItems } from "./ingestionHelpers.js";
+import { ConversationSummarizer } from "../utils/conversationSummarizer.js";
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ class NITJSRRAGSystem {
         this.isInitialized = false;
         this.linkDatabase = new Map(); // Store links for easy retrieval
         this.embeddingCache = new EmbeddingCache();
+        this.summarizer = null; // Will be initialized after chatModel is ready
         this.mongo = mongo;
         this.pagesColl = mongo?.pagesColl || null;
         this.chunksColl = mongo?.chunksColl || null;
@@ -108,6 +110,13 @@ class NITJSRRAGSystem {
             });
 
             await this.ensureMongoIndexes();
+
+            // Initialize conversation summarizer
+            this.summarizer = new ConversationSummarizer(this.chatModel, {
+                summaryThreshold: 12, // Summarize after 12 messages
+                recentMessagesCount: 6 // Keep last 6 messages as-is
+            });
+
             this.isInitialized = true;
             console.log("✅ Gemini RAG System initialized successfully!");
         } catch (error) {
@@ -775,7 +784,9 @@ class NITJSRRAGSystem {
         onChunk = null,
         history = [],
         language = "english",
-        userContext = null
+        userContext = null,
+        conversationSummary = null,
+        chatHistoryManager = null
     ) {
         try {
             const questionEmbedding =
@@ -833,19 +844,42 @@ class NITJSRRAGSystem {
 
             const languageInstruction = getLanguageInstruction(language);
 
-            const formatConversationHistory = (history, maxTurns = 10) => {
-                if (!Array.isArray(history) || history.length === 0) return "";
-                const recent = history.slice(-maxTurns * 2);
-                const formatted = recent
+            // Process conversation history with summarization if needed
+            let processedHistory = history;
+            let summaryText = conversationSummary;
+
+            if (this.summarizer && this.summarizer.needsSummarization(history)) {
+                const result = await this.summarizer.processHistory(history, language, conversationSummary);
+                processedHistory = result.recent;
+                summaryText = result.summary;
+
+                // Save updated summary if available
+                if (result.shouldUpdate && summaryText && chatHistoryManager) {
+                    try {
+                        const sessionId = chatHistoryManager.currentSessionId;
+                        if (sessionId) {
+                            await chatHistoryManager.setSummary(sessionId, summaryText);
+                            console.log(`[Summarizer] Saved updated summary for session`);
+                        }
+                    } catch (err) {
+                        console.warn('[Summarizer] Failed to save summary:', err.message);
+                    }
+                }
+            }
+
+            const formatConversationHistory = (recentMessages) => {
+                if (!Array.isArray(recentMessages) || recentMessages.length === 0) return "";
+                const formatted = recentMessages
                     .map((msg) => {
                         const role = msg.role === "user" ? "User" : "Assistant";
                         return `${role}: ${String(msg.content || "").trim()}`;
                     })
                     .join("\n");
-                return formatted ? `\n\nPrevious Conversation:\n${formatted}\n` : "";
+                return formatted ? `\n\nRecent Conversation:\n${formatted}\n` : "";
             };
 
-            const historySection = formatConversationHistory(history);
+            const summarySection = summaryText ? `\n\nConversation Summary (Long-term Context):\n${summaryText}\n` : "";
+            const historySection = formatConversationHistory(processedHistory);
 
             const buildUserContextSection = (userContext) => {
                 if (!userContext) return "";
@@ -854,7 +888,7 @@ class NITJSRRAGSystem {
                 if (userContext.department) parts.push(`Department: ${userContext.department}`);
                 if (userContext.year) parts.push(`Year: ${userContext.year}`);
                 if (parts.length === 0) return "";
-                return `\n\nUser Context Information:\n${parts.join('\n')}\n** IMPORTANT: Use this context to personalize responses and disambiguate queries. For example, if the user asks about "Professor KK Singh" and they are from Computer Science department, prioritize information about CS department faculty. **\n`;
+                return `\n\nUser Metadata:\n${parts.join('\n')}\n`;
             };
 
             const userContextSection = buildUserContextSection(userContext);
@@ -863,6 +897,7 @@ class NITJSRRAGSystem {
             You are an AI assistant specializing in NIT Jamshedpur information. Your role is to provide accurate, helpful, and contextually aware responses based on the provided data and conversation history.
             ${languageInstruction}
 
+            ${summarySection ? summarySection : ""}
             ${historySection ? historySection : ""}
             ${userContextSection ? userContextSection : ""}
 
@@ -876,12 +911,12 @@ class NITJSRRAGSystem {
             Instructions:
 
             Context Awareness:
-            - Use the conversation history above to understand the full context.
-            - If User Context Information is provided, use it to personalize and disambiguate responses.
-            - When the user asks about ambiguous topics (e.g., "Who is KK Singh?"), check if their department/context helps identify the specific person.
-            - If the question references previous messages (e.g., "tell me more", "what about that", "its placement"), resolve them from the conversation history.
+            - The Conversation Summary contains key facts from earlier in the conversation (long-term memory).
+            - The Recent Conversation shows the most recent exchanges (short-term memory).
+            - Use BOTH to understand the full context of the conversation.
+            - If the question references previous messages (e.g., "tell me more", "what about that", "its placement"), check both summary and recent conversation.
             - Maintain consistency with earlier responses in this conversation.
-            - Resolve pronouns like "it", "that", "this" using context.
+            - Resolve pronouns like "it", "that", "this" using context from summary and recent messages.
 
             Answer Guidelines:
             - Base your answer primarily on the context from the database.
