@@ -6,6 +6,7 @@ import { CohereEmbeddings } from "@langchain/cohere";
 import { EmbeddingCache } from "../caching/embeddingCache.js";
 import { hashString, makeChunkId, nowIso, countWords } from "./ragUtils.js";
 import { prepareIngestionItems } from "./ingestionHelpers.js";
+import { ConversationSummarizer } from "../utils/conversationSummarizer.js";
 
 dotenv.config();
 
@@ -22,6 +23,7 @@ class JharkhandGovRAGSystem {
         this.isInitialized = false;
         this.linkDatabase = new Map(); // Store links for easy retrieval
         this.embeddingCache = new EmbeddingCache();
+        this.summarizer = null; // Will be initialized after Cohere client is ready
         this.mongo = mongo;
         this.pagesColl = mongo?.pagesColl || null;
         this.chunksColl = mongo?.chunksColl || null;
@@ -171,7 +173,7 @@ CATEGORY:`;
 //     }
 
 
-    buildFocusedPrompt(question, context, history, language) {
+    buildFocusedPrompt(question, context, history, language, userContext = null, conversationSummary = null) {
         const languageConfig = {
             hindi: {
                 instruction: 'IMPORTANT: केवल हिंदी में जवाब दें (Natural Hinglish)। "Interest Rate", "Loan" जैसे शब्दों का अंग्रेजी में उपयोग करें।',
@@ -185,6 +187,7 @@ CATEGORY:`;
                 7. कोई Greeting या Closing न लिखें।
                 8. जानकारी को दोहराएं नहीं। यदि CONTEXT में एक ही बात बार-बार लिखी है, तो उसे उत्तर में केवल एक बार ही लिखें।
             `,
+                contextInstruction: 'Conversation Summary में पुरानी बातचीत के मुख्य बिंदु हैं और Recent Conversation में हाल की बातचीत है। दोनों का उपयोग करके संदर्भ समझें।',
                 fallback: 'Provide a direct answer in Hindi based ONLY on the context:'
             },
             english: {
@@ -199,26 +202,43 @@ CATEGORY:`;
                 7. No greetings or closings.
                 8. DO NOT REPEAT information. If the context contains redundant points, consolidate them into one single clear bullet point.
             `,
+                contextInstruction: 'The Conversation Summary contains key facts from earlier conversation (long-term memory) and Recent Conversation shows recent exchanges (short-term memory). Use BOTH to understand full context.',
                 fallback: 'Provide a direct answer based ONLY on the context:'
             }
         };
 
         const config = language === 'hindi' ? languageConfig.hindi : languageConfig.english;
-        const historySection = this.formatConversationHistory(history);
 
-        return `You are an AI assistant for the Jharkhand GSCC Scheme.
+        // Build conversation sections
+        const summarySection = conversationSummary ? `\n### CONVERSATION SUMMARY (Long-term Context):\n${conversationSummary}\n` : '';
+        const historySection = this.formatConversationHistory(history);
+        const recentSection = historySection ? `\n### RECENT CONVERSATION (Short-term Context):\n${historySection}\n` : '';
+
+        // Build user context section
+        const buildUserContextSection = (ctx) => {
+            if (!ctx) return '';
+            const parts = [];
+            if (ctx.role) parts.push(`Role: ${ctx.role}`);
+            if (ctx.department) parts.push(`Department: ${ctx.department}`);
+            if (ctx.year) parts.push(`Year: ${ctx.year}`);
+            if (parts.length === 0) return '';
+            return `\n### USER METADATA:\n${parts.join('\n')}\n`;
+        };
+        const userContextSection = buildUserContextSection(userContext);
+
+        const contextAwarenessNote = (summarySection || recentSection) ? `\n### CONTEXT AWARENESS:\n${config.contextInstruction}\n` : '';
+
+        return `You are an AI assistant for the NIT Jamshedpur (NITJSR) information system.
 
 ${config.instruction}
 
 ### RULES:
 ${config.rules}
-
-${historySection ? '### PREVIOUS CONVERSATION:\n' + historySection + '\n' : ''}
-
-### CONTEXT:
+${contextAwarenessNote}${summarySection}${recentSection}${userContextSection}
+### KNOWLEDGE BASE CONTEXT:
 ${context}
 
-### QUESTION:
+### CURRENT QUESTION:
 ${question}
 
 ${config.fallback}`;
@@ -294,6 +314,12 @@ ${config.fallback}`;
                 chunkSize: 1200,
                 chunkOverlap: 300,
                 separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+            });
+
+            // Initialize conversation summarizer
+            this.summarizer = new ConversationSummarizer(this.cohere, this.chatModelName, {
+                summaryThreshold: 12,
+                recentMessagesCount: 6
             });
 
             await this.ensureMongoIndexes();
@@ -968,7 +994,10 @@ ${config.fallback}`;
         precomputedEmbedding = null,
         onChunk = null,
         history = [],
-        language = "english"
+        language = "english",
+        userContext = null,
+        conversationSummary = null,
+        chatHistoryManager = null
     ) {
         try {
             // Step 1: Classify the query
@@ -1060,14 +1089,37 @@ ${config.fallback}`;
             //     };
             // }
 
-            // Step 6: Build clean context (NO document listings in context)
+            // Step 6: Process conversation history with summarization if needed
+            let processedHistory = history;
+            let summaryText = conversationSummary;
+
+            if (this.summarizer && this.summarizer.needsSummarization(history)) {
+                const result = await this.summarizer.processHistory(history, language, conversationSummary);
+                processedHistory = result.recent;
+                summaryText = result.summary;
+
+                // Save updated summary if available
+                if (result.shouldUpdate && summaryText && chatHistoryManager) {
+                    try {
+                        const sessionId = chatHistoryManager.currentSessionId;
+                        if (sessionId) {
+                            await chatHistoryManager.setSummary(sessionId, summaryText);
+                            console.log(`[Summarizer] Saved updated summary for session`);
+                        }
+                    } catch (err) {
+                        console.warn('[Summarizer] Failed to save summary:', err.message);
+                    }
+                }
+            }
+
+            // Step 7: Build clean context (NO document listings in context)
             const context = relevantDocs
                 .slice(0, 5)
                 .map(doc => doc.text)
                 .join("\n\n");
 
-            // Step 7: Build focused prompt
-            const prompt = this.buildFocusedPrompt(question, context, history, language);
+            // Step 8: Build focused prompt with conversation summary and user context
+            const prompt = this.buildFocusedPrompt(question, context, processedHistory, language, userContext, summaryText);
 
             console.log("===================PROMPT==================:");
             console.log(prompt);
