@@ -52,7 +52,6 @@ export async function loadLatestScrapedData(__dirname) {
 
 export function validateEnvironment() {
     const required = [
-        'GEMINI_API_KEY',
         'COHERE_API_KEY',
         'PINECONE_API_KEY',
         'PINECONE_INDEX_NAME',

@@ -2,8 +2,9 @@
 // Summarizes long conversations to maintain context without overwhelming the LLM
 
 export class ConversationSummarizer {
-    constructor(geminiModel, options = {}) {
-        this.geminiModel = geminiModel;
+    constructor(cohereClient, chatModelName, options = {}) {
+        this.cohereClient = cohereClient;
+        this.chatModelName = chatModelName;
         this.summaryThreshold = options.summaryThreshold || 12; // Summarize after 12 messages (6 turns)
         this.recentMessagesCount = options.recentMessagesCount || 6; // Keep last 6 messages as-is
     }
@@ -58,9 +59,13 @@ Format as bullet points. If previous summary exists, merge and deduplicate infor
 Summary:`;
 
         try {
-            const result = await this.geminiModel.generateContent(prompt);
-            const response = await result.response;
-            const summary = response.text().trim();
+            const response = await this.cohereClient.chat({
+                model: this.chatModelName,
+                message: prompt,
+                temperature: 0.3,
+            });
+
+            const summary = response.text.trim();
 
             console.log(`[Summarizer] Generated summary (${summary.length} chars) from ${messages.length} messages`);
             return summary;

@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { CohereClient } from "cohere-ai";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { CohereEmbeddings } from "@langchain/cohere";
@@ -22,11 +22,11 @@ function getLanguageInstruction(language) {
 class NITJSRRAGSystem {
     constructor(options = {}) {
         const { mongo = null } = options || {};
-        this.genAI = null;
+        this.cohere = null;
+        this.chatModelName = null;
         this.pinecone = null;
         this.index = null;
         this.embeddings = null;
-        this.chatModel = null;
         this.textSplitter = null;
         this.isInitialized = false;
         this.linkDatabase = new Map(); // Store links for easy retrieval
@@ -62,14 +62,14 @@ class NITJSRRAGSystem {
     async initialize() {
         if (this.isInitialized) return;
 
-        console.log("Initializing Gemini(chat) + Cohere(emb) + Pinecone...");
+        console.log("Initializing Cohere(chat + emb) + Pinecone...");
 
         try {
-            // Initialize Google Gemini
-            this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            this.chatModel = this.genAI.getGenerativeModel({
-                model: "gemini-2.0-flash",
+            // Initialize Cohere Client
+            this.cohere = new CohereClient({
+                token: process.env.COHERE_API_KEY,
             });
+            this.chatModelName = process.env.COHERE_CHAT_MODEL || "command-r-plus";
 
             // Initialize Pinecone
             this.pinecone = new Pinecone({
@@ -112,13 +112,13 @@ class NITJSRRAGSystem {
             await this.ensureMongoIndexes();
 
             // Initialize conversation summarizer
-            this.summarizer = new ConversationSummarizer(this.chatModel, {
+            this.summarizer = new ConversationSummarizer(this.cohere, this.chatModelName, {
                 summaryThreshold: 12, // Summarize after 12 messages
                 recentMessagesCount: 6 // Keep last 6 messages as-is
             });
 
             this.isInitialized = true;
-            console.log("✅ Gemini RAG System initialized successfully!");
+            console.log("✅ Cohere RAG System initialized successfully!");
         } catch (error) {
             console.error("❌ RAG System initialization failed:", error.message);
             throw error;
@@ -947,13 +947,23 @@ class NITJSRRAGSystem {
               `[Chat] Processing ${history.length} messages | Language: ${language}`
             );
 
-            const streamResult = await this.chatModel.generateContentStream(prompt);
+            const messages = [
+                {
+                    role: "user",
+                    content: prompt
+                }
+            ];
+
+            const stream = await this.cohere.v2.chatStream({
+                model: this.chatModelName,
+                messages: messages,
+            });
+
             let fullText = "";
 
-            if (streamResult?.stream) {
-                for await (const chunk of streamResult.stream) {
-                    const part =
-                        typeof chunk?.text === "function" ? chunk.text() : chunk?.text;
+            for await (const chunk of stream) {
+                if (chunk.type === "content-delta") {
+                    const part = chunk.delta?.message?.content?.text;
                     if (part) {
                         fullText += part;
                         if (typeof onChunk === "function") {
@@ -963,12 +973,6 @@ class NITJSRRAGSystem {
                         }
                     }
                 }
-            }
-
-            if (!fullText && streamResult?.response) {
-                try {
-                    fullText = (await streamResult.response).text() || "";
-                } catch (_) {}
             }
 
             const enhancedSources = relevantDocs.map((doc) => ({
