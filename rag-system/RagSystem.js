@@ -774,7 +774,8 @@ class NITJSRRAGSystem {
         precomputedEmbedding = null,
         onChunk = null,
         history = [],
-        language = "english"
+        language = "english",
+        userContext = null
     ) {
         try {
             const questionEmbedding =
@@ -832,7 +833,7 @@ class NITJSRRAGSystem {
 
             const languageInstruction = getLanguageInstruction(language);
 
-            const formatConversationHistory = (history, maxTurns = 5) => {
+            const formatConversationHistory = (history, maxTurns = 10) => {
                 if (!Array.isArray(history) || history.length === 0) return "";
                 const recent = history.slice(-maxTurns * 2);
                 const formatted = recent
@@ -846,46 +847,62 @@ class NITJSRRAGSystem {
 
             const historySection = formatConversationHistory(history);
 
+            const buildUserContextSection = (userContext) => {
+                if (!userContext) return "";
+                const parts = [];
+                if (userContext.role) parts.push(`Role: ${userContext.role}`);
+                if (userContext.department) parts.push(`Department: ${userContext.department}`);
+                if (userContext.year) parts.push(`Year: ${userContext.year}`);
+                if (parts.length === 0) return "";
+                return `\n\nUser Context Information:\n${parts.join('\n')}\n** IMPORTANT: Use this context to personalize responses and disambiguate queries. For example, if the user asks about "Professor KK Singh" and they are from Computer Science department, prioritize information about CS department faculty. **\n`;
+            };
+
+            const userContextSection = buildUserContextSection(userContext);
+
             const prompt = `
             You are an AI assistant specializing in NIT Jamshedpur information. Your role is to provide accurate, helpful, and contextually aware responses based on the provided data and conversation history.
             ${languageInstruction}
-            
+
             ${historySection ? historySection : ""}
-            
+            ${userContextSection ? userContextSection : ""}
+
             Knowledge Base Context:
             ${context || "No relevant context found."}
             ${linksContext}
-            
+
             Current Question: ${question}
             ${languageInstruction}
-            
+
             Instructions:
-            
+
             Context Awareness:
             - Use the conversation history above to understand the full context.
+            - If User Context Information is provided, use it to personalize and disambiguate responses.
+            - When the user asks about ambiguous topics (e.g., "Who is KK Singh?"), check if their department/context helps identify the specific person.
             - If the question references previous messages (e.g., "tell me more", "what about that", "its placement"), resolve them from the conversation history.
             - Maintain consistency with earlier responses in this conversation.
             - Resolve pronouns like "it", "that", "this" using context.
-            
+
             Answer Guidelines:
             - Base your answer primarily on the context from the database.
+            - Use user context (department, year, role) to provide more relevant answers.
             - Provide specific data points (placement %, packages, companies, year, etc.) when available.
             - If context lacks information, clearly state that.
             - Be concise, professional, and structured.
             - When relevant links are available, mention them naturally.
             - For PDFs, say: "Refer to [Document Name] (PDF): [URL]"
             - For web pages, say: "See [Page Title]: [URL]"
-            
+
             Formatting:
             - Use clear paragraphs.
             - Bold key points with **text**.
             - Use bullet points when appropriate.
             - Keep tone informative yet conversational.
-            
+
             Follow-up Handling:
             - If user asks "tell me more" or similar, expand on the most recent topic.
             - If unsure what pronoun refers to, ask for clarification.
-            
+
             Answer:
             `;
 
