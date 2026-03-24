@@ -1,7 +1,7 @@
 import { createRateLimiter } from '../rate-limiting/rateLimiter.js';
 import { getMessage, languageManager } from '../utils/language.js';
 import { validateBody, validateParams, chatStreamSchema, setLanguageSchema, getLanguageSchema, clearConversationSchema } from '../utils/validation.js';
-import { ContextExtractor } from '../utils/contextExtractor.js';
+import { SimpleContextExtractor } from '../utils/simpleContextExtractor.js';
 
 /**
  * Extracts and validates chat response fields from the final response object.
@@ -20,7 +20,7 @@ function extractChatResponseFields(finalResponse) {
 
 
 export function setupChatRoutes(app, server) {
-    const contextExtractor = new ContextExtractor();
+    const contextExtractor = new SimpleContextExtractor();
 
     // SET user's language preference
     app.post('/set-language', validateBody(setLanguageSchema), async (req, res) => {
@@ -142,15 +142,19 @@ export function setupChatRoutes(app, server) {
 
             const history = server.chatHistory ? await server.chatHistory.getHistory(sessionId) : [];
 
-            // Extract user context from the question
-            const extractedContext = contextExtractor.extractContext(question);
+            // Extract basic user info from the question
+            const extractedContext = contextExtractor.extractBasicInfo(question);
             if (extractedContext && server.chatHistory) {
                 await server.chatHistory.updateUserContext(sessionId, extractedContext);
                 console.log(`[Context] Extracted and saved: ${JSON.stringify(extractedContext)} for session ${sessionId}`);
             }
 
-            // Get user context for better responses
+            // Get user context and conversation summary
             const userContext = server.chatHistory ? await server.chatHistory.getUserContext(sessionId) : null;
+            const conversationSummary = server.chatHistory ? await server.chatHistory.getSummary(sessionId) : null;
+
+            // Pass chat history manager with session ID for summarization
+            const chatHistoryManager = server.chatHistory ? { ...server.chatHistory, currentSessionId: sessionId } : null;
 
             const recordHistory = async (assistantText) => {
                 if (!server.chatHistory) return;
@@ -249,7 +253,7 @@ export function setupChatRoutes(app, server) {
             }
 
             try {
-                console.log(`[chat-stream] Processing question in ${userLanguage} for session ${sessionId} (history: ${history.length} messages, context: ${userContext ? 'yes' : 'no'})`);
+                console.log(`[chat-stream] Processing question in ${userLanguage} for session ${sessionId} (history: ${history.length} messages, summary: ${conversationSummary ? 'yes' : 'no'}, context: ${userContext ? 'yes' : 'no'})`);
 
                 const finalResponse = await server.ragSystem.chatStream(
                     question,
@@ -261,7 +265,9 @@ export function setupChatRoutes(app, server) {
                     },
                     history,
                     userLanguage,
-                    userContext
+                    userContext,
+                    conversationSummary,
+                    chatHistoryManager
                 );
 
                 const { answerText, sources, relevantLinks, confidence } =

@@ -39,6 +39,10 @@ export class ChatHistory {
     return `${this.namespace}:ctx:${sessionId}`;
   }
 
+  summaryKey(sessionId) {
+    return `${this.namespace}:sum:${sessionId}`;
+  }
+
   normalizeMessage(message = {}) {
     const roleInput = typeof message.role === 'string' ? message.role.toLowerCase() : 'user';
     const role = VALID_ROLES.has(roleInput) ? roleInput : 'user';
@@ -94,9 +98,11 @@ export class ChatHistory {
     if (this.backend === 'redis') {
       await this.redis.del(this.key(sessionId));
       await this.redis.del(this.contextKey(sessionId));
+      await this.redis.del(this.summaryKey(sessionId));
     } else {
       this.lru.delete(sessionId);
       this.lru.delete(`ctx:${sessionId}`);
+      this.lru.delete(`sum:${sessionId}`);
     }
   }
 
@@ -145,5 +151,27 @@ export class ChatHistory {
       updatedAt: new Date().toISOString(),
     };
     await this.setUserContext(sessionId, updated);
+  }
+
+  async setSummary(sessionId, summary) {
+    if (!sessionId || !summary) return;
+    if (this.backend === 'redis') {
+      const key = this.summaryKey(sessionId);
+      await this.redis.set(key, summary);
+      if (this.sessionTtlSeconds > 0) {
+        await this.redis.expire(key, this.sessionTtlSeconds);
+      }
+    } else {
+      this.lru.set(`sum:${sessionId}`, summary);
+    }
+  }
+
+  async getSummary(sessionId) {
+    if (!sessionId) return null;
+    if (this.backend === 'redis') {
+      const key = this.summaryKey(sessionId);
+      return await this.redis.get(key);
+    }
+    return this.lru.get(`sum:${sessionId}`) || null;
   }
 }
