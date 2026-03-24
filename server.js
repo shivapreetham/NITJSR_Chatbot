@@ -117,7 +117,7 @@ class NITJSRServer {
             await this.ragSystem.initialize();
 
             this.isInitialized = true;
-            console.log('Gemini RAG system initialization completed successfully!');
+            console.log('Cohere RAG system initialization completed successfully!');
         } catch (error) {
             console.error('System initialization failed:', error.message);
             throw error;
@@ -130,19 +130,19 @@ class NITJSRServer {
             await this.dbManager.connectMongo();
             this.server = this.app.listen(port, async () => {
                 console.log(`Server listening on port ${port}`);
-                console.log('AI Provider: Google Gemini');
+                console.log('AI Provider: Cohere');
 
                 // Auto-initialize on startup (configurable)
                 const shouldAutoInit = (process.env.AUTO_INIT || 'true').toLowerCase() !== 'false';
                 if (shouldAutoInit) {
                     try {
-                        console.log('Auto-initializing Gemini RAG system...');
+                        console.log('Auto-initializing Cohere RAG system...');
                         await this.initializeSystem();
-                        console.log('Server fully operational with Gemini AI!');
+                        console.log('Server fully operational with Cohere AI!');
                     } catch (error) {
                         console.error('Auto-initialization failed:', error.message);
                         console.log('Manual initialization: POST /initialize');
-                        console.log('Test connections: GET /test-gemini and GET /test-pinecone');
+                        console.log('Test connections: GET /test-cohere and GET /test-pinecone');
                     }
                 } else {
                     console.log('Auto-initialization disabled. Initialize manually via POST /initialize');

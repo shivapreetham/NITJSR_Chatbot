@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git filter-branch:*)",
+      "Bash(GIT_SEQUENCE_EDITOR=\"sed -i ''s/^pick 6807224/edit 6807224/; s/^pick 7be59dc/edit 7be59dc/; s/^pick 5335fae/edit 5335fae/''\" git rebase -i 6807224^)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

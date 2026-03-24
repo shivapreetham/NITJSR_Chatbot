@@ -1,5 +1,7 @@
 import { createRateLimiter } from '../rate-limiting/rateLimiter.js';
-import { getMessage, languageManager } from '../utils/language.js'
+import { getMessage, languageManager } from '../utils/language.js';
+import { validateBody, validateParams, chatStreamSchema, setLanguageSchema, getLanguageSchema, clearConversationSchema } from '../utils/validation.js';
+import { SimpleContextExtractor } from '../utils/simpleContextExtractor.js';
 
 /**
  * Extracts and validates chat response fields from the final response object.
@@ -18,36 +20,14 @@ function extractChatResponseFields(finalResponse) {
 
 
 export function setupChatRoutes(app, server) {
+    const contextExtractor = new SimpleContextExtractor();
 
     // SET user's language preference
-    app.post('/set-language', async (req, res) => {
+    app.post('/set-language', validateBody(setLanguageSchema), async (req, res) => {
         try {
-            const { sessionId, language } = req.body;
-
-            if (!sessionId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Session ID is required'
-                });
-            }
-
-            if (!language) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Language is required'
-                });
-            }
-
-            if (!['english', 'hindi'].includes(language.toLowerCase())) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Invalid language. Must be "english" or "hindi"'
-                });
-            }
-
+            const { sessionId, language } = req.validatedBody;
             const normalizedLanguage = language.toLowerCase();
 
-            // Store language preference (you can extend this to use Redis/MongoDB)
             console.log(`[Language] Set ${sessionId} -> ${normalizedLanguage}`);
 
             const confirmationMessage = getMessage('languageChanged', normalizedLanguage);
@@ -70,16 +50,9 @@ export function setupChatRoutes(app, server) {
 
 
     // GET user's language preference
-    app.get('/get-language/:sessionId', async (req, res) => {
+    app.get('/get-language/:sessionId', validateParams(getLanguageSchema), async (req, res) => {
         try {
-            const { sessionId } = req.params;
-
-            if (!sessionId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Session ID is required'
-                });
-            }
+            const { sessionId } = req.validatedParams;
 
             // Since language is managed client-side, we return a success response
             // In production, you'd retrieve this from Redis/MongoDB
@@ -95,6 +68,30 @@ export function setupChatRoutes(app, server) {
             res.status(500).json({
                 success: false,
                 error: error.message || 'Failed to get language'
+            });
+        }
+    });
+
+    // CLEAR conversation history
+    app.post('/clear-conversation', validateBody(clearConversationSchema), async (req, res) => {
+        try {
+            const { sessionId } = req.validatedBody;
+
+            if (server.chatHistory) {
+                await server.chatHistory.clear(sessionId);
+                console.log(`[ChatHistory] Cleared conversation for session ${sessionId}`);
+            }
+
+            res.json({
+                success: true,
+                message: 'Conversation cleared successfully',
+                sessionId: sessionId
+            });
+        } catch (error) {
+            console.error('[clear-conversation] Error:', error);
+            res.status(500).json({
+                success: false,
+                error: error.message || 'Failed to clear conversation'
             });
         }
     });
@@ -117,16 +114,10 @@ export function setupChatRoutes(app, server) {
             }
             return server._chatRateLimiter(req, res, next);
         },
+        validateBody(chatStreamSchema),
 
         async (req, res) => {
-            const { question, sessionId: clientSessionId, language: clientLanguage } = req.body || {};
-
-            if (!question || question.trim().length === 0) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Question is required and cannot be empty'
-                });
-            }
+            const { question, sessionId: clientSessionId, language: clientLanguage } = req.validatedBody;
 
             const headerSessionId =
                 typeof req.headers['x-session-id'] === 'string' ? req.headers['x-session-id'] : undefined;
@@ -149,14 +140,21 @@ export function setupChatRoutes(app, server) {
                 });
             }
 
-            if (!['english', 'hindi'].includes(userLanguage)) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Invalid language parameter. Must be "english" or "hindi"'
-                });
+            const history = server.chatHistory ? await server.chatHistory.getHistory(sessionId) : [];
+
+            // Extract basic user info from the question
+            const extractedContext = contextExtractor.extractBasicInfo(question);
+            if (extractedContext && server.chatHistory) {
+                await server.chatHistory.updateUserContext(sessionId, extractedContext);
+                console.log(`[Context] Extracted and saved: ${JSON.stringify(extractedContext)} for session ${sessionId}`);
             }
 
-            const history = server.chatHistory ? await server.chatHistory.getHistory(sessionId) : [];
+            // Get user context and conversation summary
+            const userContext = server.chatHistory ? await server.chatHistory.getUserContext(sessionId) : null;
+            const conversationSummary = server.chatHistory ? await server.chatHistory.getSummary(sessionId) : null;
+
+            // Pass chat history manager with session ID for summarization
+            const chatHistoryManager = server.chatHistory ? { ...server.chatHistory, currentSessionId: sessionId } : null;
 
             const recordHistory = async (assistantText) => {
                 if (!server.chatHistory) return;
@@ -255,7 +253,7 @@ export function setupChatRoutes(app, server) {
             }
 
             try {
-                console.log(`[chat-stream] Processing question in ${userLanguage} for session ${sessionId} (history: ${history.length} messages)`);
+                console.log(`[chat-stream] Processing question in ${userLanguage} for session ${sessionId} (history: ${history.length} messages, summary: ${conversationSummary ? 'yes' : 'no'}, context: ${userContext ? 'yes' : 'no'})`);
 
                 const finalResponse = await server.ragSystem.chatStream(
                     question,
@@ -266,7 +264,10 @@ export function setupChatRoutes(app, server) {
                         }
                     },
                     history,
-                    userLanguage
+                    userLanguage,
+                    userContext,
+                    conversationSummary,
+                    chatHistoryManager
                 );
 
                 const { answerText, sources, relevantLinks, confidence } =

@@ -1,35 +1,29 @@
 import dotenv from "dotenv";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { CohereClient } from "cohere-ai";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { CohereEmbeddings } from "@langchain/cohere";
 import { EmbeddingCache } from "../caching/embeddingCache.js";
 import { hashString, makeChunkId, nowIso, countWords } from "./ragUtils.js";
 import { prepareIngestionItems } from "./ingestionHelpers.js";
+import { ConversationSummarizer } from "../utils/conversationSummarizer.js";
 
 dotenv.config();
 
 
-function getLanguageInstruction(language) {
-    if (language === 'hindi') {
-        return '\n\nIMPORTANT: You MUST respond ONLY in Hindi (Devanagari script: हिंदी). Use simple, clear Hindi language. Translate all technical terms to Hindi where possible, but you may keep English terms in parentheses for clarity when needed. The entire response should be in Hindi script, EVEN IF THE USER ASKS A QUESTION IN ANY OTHER LANGUAGE!';
-    }
-    return '\n\nIMPORTANT: You MUST respond ONLY in English. Use clear, professional English language, EVEN IF THE USER ASKS A QUESTION IN ANY OTHER LANGUAGE!';
-}
-
-
-class NITJSRRAGSystem {
+class JharkhandGovRAGSystem {
     constructor(options = {}) {
         const { mongo = null } = options || {};
-        this.genAI = null;
+        this.cohere = null;
         this.pinecone = null;
         this.index = null;
         this.embeddings = null;
-        this.chatModel = null;
+        this.chatModelName = process.env.COHERE_CHAT_MODEL || "command-r-plus";
         this.textSplitter = null;
         this.isInitialized = false;
         this.linkDatabase = new Map(); // Store links for easy retrieval
         this.embeddingCache = new EmbeddingCache();
+        this.summarizer = null; // Will be initialized after Cohere client is ready
         this.mongo = mongo;
         this.pagesColl = mongo?.pagesColl || null;
         this.chunksColl = mongo?.chunksColl || null;
@@ -41,6 +35,222 @@ class NITJSRRAGSystem {
                 `[EmbeddingCache] initialized backend=${ec.backend} ttlSeconds=${ec.ttlSeconds} namespace=${ec.namespace}`
             );
         } catch (_) {}
+    }
+
+    async classifyQuery(question, language = "english") {
+        const classificationPrompt = language === "hindi"
+            ? `आप एक AI सहायक हैं जो GSCC योजना से संबंधित प्रश्नों को वर्गीकृत (classify) करता है।
+
+**निर्देश:**
+1. वर्तनी (spelling) और व्याकरण की गलतियों को पूरी तरह नज़रअंदाज़ करें।
+2. उत्तर में केवल श्रेणी का नाम (Category Name) लिखें, और कुछ भी नहीं।
+
+**श्रेणियां (Categories):**
+- GSCC_SPECIFIC:FACT_LIST -> दस्तावेज़, पात्रता (eligibility), या समय-सीमा की सूची।
+- GSCC_SPECIFIC:FACT_VALUE -> कोई एक निश्चित संख्या या जानकारी (ब्याज दर, अधिकतम लोन, आयु सीमा)।
+- GSCC_SPECIFIC:PROCEDURE -> काम करने का तरीका या स्टेप-बाय-स्टेप गाइड (आवेदन कैसे करें)।
+- GSCC_SPECIFIC:EXPLANATION -> योजना के बारे में विस्तार से जानकारी या "क्यों" वाले प्रश्न।
+- GREETING -> नमस्ते, हाय, धन्यवाद।
+- FOLLOWUP -> पिछले सवाल से जुड़ा छोटा सवाल (जैसे: "और क्या?", "इसके बाद क्या करें?")।
+
+**उदाहरण (Examples):**
+- "जरूरी कागज कौन से हैं?" -> GSCC_SPECIFIC:FACT_LIST
+- "ब्याज कितना लगेगा?" -> GSCC_SPECIFIC:FACT_VALUE
+- "फॉर्म कैसे भरना है?" -> GSCC_SPECIFIC:PROCEDURE
+- "GSCC स्कीम क्या है और इसके फायदे क्या हैं?" -> GSCC_SPECIFIC:EXPLANATION
+- "नमस्ते" -> GREETING
+
+प्रश्न: "${question}"
+श्रेणी:`
+            : `Analyze this query for the GSCC scheme classification. Be extremely lenient with spelling and typos.
+
+**Categories:**
+- GSCC_SPECIFIC:FACT_LIST (Lists like docs, eligibility criteria, slabs)
+- GSCC_SPECIFIC:FACT_VALUE (Single values like max loan, interest rate, age limit)
+- GSCC_SPECIFIC:PROCEDURE (Step-by-step "how-to" processes)
+- GSCC_SPECIFIC:EXPLANATION (Conceptual questions, "why", "how it works")
+- GREETING (Hi, hello, thanks)
+- FOLLOWUP (Contextual continuation like "anything else?")
+
+**Examples:**
+- "What docs are needed?" -> GSCC_SPECIFIC:FACT_LIST
+- "What's the max limit?" -> GSCC_SPECIFIC:FACT_VALUE
+- "How do I apply?" -> GSCC_SPECIFIC:PROCEDURE
+- "Explain the scheme" -> GSCC_SPECIFIC:EXPLANATION
+
+Return ONLY the category name.
+
+QUERY: "${question}"
+CATEGORY:`;
+
+
+        try {
+            const response = await this.cohere.chat({
+                model: this.chatModelName,
+                message: classificationPrompt,
+                temperature: 0.1,
+                maxTokens: 10
+            });
+
+            const category = response.text.trim().toUpperCase();
+
+            // Map to standardized categories
+            if (category.includes('GSCC') || category.includes('SPECIFIC')) return 'GSCC_SPECIFIC';
+            if (category.includes('GREETING')) return 'GREETING';
+            // if (category.includes('VAGUE')) return 'VAGUE';
+            if (category.includes('OFF_TOPIC') || category.includes('TOPIC')) return 'OFF_TOPIC';
+            if (category.includes('FOLLOWUP') || category.includes('FOLLOW')) return 'FOLLOWUP';
+
+            return 'GSCC_SPECIFIC'; // Default to specific if unclear
+        } catch (error) {
+            console.error('[Query Classification Error]:', error);
+            return 'GSCC_SPECIFIC'; // Fail open
+        }
+    }
+
+
+    async handleGreeting(language) {
+        return language === "hindi"
+            ? "नमस्ते! मैं GSCC योजना विशेषज्ञ हूँ। मैं पात्रता, ऋण राशि, ब्याज दर, आवेदन प्रक्रिया या दस्तावेज़ों के बारे में बता सकता हूँ। आप क्या जानना चाहेंगे?"
+            : "Hello! I'm the GSCC Scheme expert. I can explain eligibility, loan amounts, interest rates, application process, or required documents. What would you like to know?";
+    }
+
+
+    async handleOffTopic(language) {
+        return language === "hindi"
+            ? "मैं केवल झारखंड सरकार की गुरुजी स्टूडेंट क्रेडिट कार्ड (GSCC) योजना के बारे में सहायता कर सकता हूँ। कृपया योजना के बारे में प्रश्न पूछें।"
+            : "I can only help with the Jharkhand Government's Guruji Student Credit Card (GSCC) Scheme. Please ask questions related to the scheme.";
+    }
+
+
+    isContextRelevant(relevantDocs, minScore = 0.4, minDocs = 1) {
+        if (!relevantDocs || relevantDocs.length === 0) return false;
+
+        const highQualityDocs = relevantDocs.filter(doc => {
+            console.log("SCORE:", doc.score);
+            return doc.score >= minScore;
+        });
+
+        if (highQualityDocs.length < minDocs) {
+            console.log(`[Context Check] Only ${highQualityDocs.length} relevant docs found (need ${minDocs})`);
+            return false;
+        }
+
+        return true;
+    }
+
+
+//     buildFocusedPrompt(question, context, history, language) {
+//         const languageInstruction = language === 'hindi'
+//             ? '\n\nIMPORTANT: केवल हिंदी में जवाब दें। सरल और स्पष्ट भाषा का उपयोग करें।'
+//             : '\n\nIMPORTANT: Respond ONLY in English. Use clear, professional language.';
+//
+//         const historySection = this.formatConversationHistory(history);
+//
+//         return `You are an AI assistant for the Jharkhand GSCC Scheme.
+//
+// ${languageInstruction}
+//
+//
+// ### RULES:
+// 1. Answer ONLY using the provided context below
+// 2. Be VERY lenient with spelling mistakes - understand the intent even if words are misspelled
+// 3. Be concise - maximum 3 short paragraphs
+// 4. NEVER include document citations like "[PDF Document X: ...]" in your answer
+// 5. If the context doesn't contain the answer, say: "I don't have that specific information"
+// 6. Use bullet points ONLY for listing items (maximum 5-7 items)
+// 7. No greetings, no closings - just answer directly
+//
+// ${historySection ? '### PREVIOUS CONVERSATION:\n' + historySection + '\n' : ''}
+//
+// ### CONTEXT:
+// ${context}
+//
+// ### QUESTION:
+// ${question}
+//
+// Provide a direct, helpful answer based ONLY on the context above:`;
+//     }
+
+
+    buildFocusedPrompt(question, context, history, language, userContext = null, conversationSummary = null) {
+        const languageConfig = {
+            hindi: {
+                instruction: 'IMPORTANT: केवल हिंदी में जवाब दें (Natural Hinglish)। "Interest Rate", "Loan" जैसे शब्दों का अंग्रेजी में उपयोग करें।',
+                rules: `
+                1. केवल नीचे दिए गए "CONTEXT" के आधार पर उत्तर दें।
+                2. वर्तनी की गलतियों को नजरअंदाज करें।
+                3. उत्तर संक्षिप्त रखें - अधिकतम 3 छोटे पैराग्राफ।
+                4. [PDF Document X] जैसे साइटेशन न लिखें।
+                5. यदि जवाब नहीं है, तो कहें: "क्षमा करें, मेरे पास यह जानकारी नहीं है।"
+                6. लिस्ट के लिए बुलेट पॉइंट्स का उपयोग करें (अधिकतम 5-7 आइटम)।
+                7. कोई Greeting या Closing न लिखें।
+                8. जानकारी को दोहराएं नहीं। यदि CONTEXT में एक ही बात बार-बार लिखी है, तो उसे उत्तर में केवल एक बार ही लिखें।
+            `,
+                contextInstruction: 'Conversation Summary में पुरानी बातचीत के मुख्य बिंदु हैं और Recent Conversation में हाल की बातचीत है। दोनों का उपयोग करके संदर्भ समझें।',
+                fallback: 'Provide a direct answer in Hindi based ONLY on the context:'
+            },
+            english: {
+                instruction: 'IMPORTANT: Respond ONLY in English.',
+                rules: `
+                1. Answer ONLY using the provided context.
+                2. Be lenient with spelling mistakes.
+                3. Be concise - maximum 3 short paragraphs.
+                4. NEVER include document citations like "[PDF Document X]".
+                5. If information is missing, say: "I don't have that specific information."
+                6. Use bullet points for lists (max 5-7 items).
+                7. No greetings or closings.
+                8. DO NOT REPEAT information. If the context contains redundant points, consolidate them into one single clear bullet point.
+            `,
+                contextInstruction: 'The Conversation Summary contains key facts from earlier conversation (long-term memory) and Recent Conversation shows recent exchanges (short-term memory). Use BOTH to understand full context.',
+                fallback: 'Provide a direct answer based ONLY on the context:'
+            }
+        };
+
+        const config = language === 'hindi' ? languageConfig.hindi : languageConfig.english;
+
+        // Build conversation sections
+        const summarySection = conversationSummary ? `\n### CONVERSATION SUMMARY (Long-term Context):\n${conversationSummary}\n` : '';
+        const historySection = this.formatConversationHistory(history);
+        const recentSection = historySection ? `\n### RECENT CONVERSATION (Short-term Context):\n${historySection}\n` : '';
+
+        // Build user context section
+        const buildUserContextSection = (ctx) => {
+            if (!ctx) return '';
+            const parts = [];
+            if (ctx.role) parts.push(`Role: ${ctx.role}`);
+            if (ctx.department) parts.push(`Department: ${ctx.department}`);
+            if (ctx.year) parts.push(`Year: ${ctx.year}`);
+            if (parts.length === 0) return '';
+            return `\n### USER METADATA:\n${parts.join('\n')}\n`;
+        };
+        const userContextSection = buildUserContextSection(userContext);
+
+        const contextAwarenessNote = (summarySection || recentSection) ? `\n### CONTEXT AWARENESS:\n${config.contextInstruction}\n` : '';
+
+        return `You are an AI assistant for the NIT Jamshedpur (NITJSR) information system.
+
+${config.instruction}
+
+### RULES:
+${config.rules}
+${contextAwarenessNote}${summarySection}${recentSection}${userContextSection}
+### KNOWLEDGE BASE CONTEXT:
+${context}
+
+### CURRENT QUESTION:
+${question}
+
+${config.fallback}`;
+    }
+
+
+    formatConversationHistory(history, maxTurns = 3) {
+        if (!Array.isArray(history) || history.length === 0) return "";
+        const recent = history.slice(-maxTurns * 2);
+        return recent
+            .map((msg) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+            .join('\n');
     }
 
     refreshMongoHandles() {
@@ -60,13 +270,12 @@ class NITJSRRAGSystem {
     async initialize() {
         if (this.isInitialized) return;
 
-        console.log("Initializing Gemini(chat) + Cohere(emb) + Pinecone...");
+        console.log("Initializing Cohere(chat) + Cohere(emb) + Pinecone...");
 
         try {
-            // Initialize Google Gemini
-            this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            this.chatModel = this.genAI.getGenerativeModel({
-                model: "gemini-2.0-flash",
+            // Initialize Cohere Client
+            this.cohere = new CohereClient({
+                token: process.env.COHERE_API_KEY,
             });
 
             // Initialize Pinecone
@@ -107,9 +316,15 @@ class NITJSRRAGSystem {
                 separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
             });
 
+            // Initialize conversation summarizer
+            this.summarizer = new ConversationSummarizer(this.cohere, this.chatModelName, {
+                summaryThreshold: 12,
+                recentMessagesCount: 6
+            });
+
             await this.ensureMongoIndexes();
             this.isInitialized = true;
-            console.log("✅ Gemini RAG System initialized successfully!");
+            console.log("✅ Cohere RAG System initialized successfully!");
         } catch (error) {
             console.error("❌ RAG System initialization failed:", error.message);
             throw error;
@@ -750,11 +965,16 @@ class NITJSRRAGSystem {
         }
 
         const seenUrls = new Set();
+
+        //TODO: This is local pdf url in my computer, may need change during deployment
+        seenUrls.add("local://guruji_guidelines.pdf");
+        seenUrls.add("local://676_2_2024.pdf");
+
         const deduplicated = [];
 
         for (const source of relevantSources) {
             const url = source.url || '';
-            if (!url || !seenUrls.has(url)) {
+            if (!url || !seenUrls.has(url) ) {
                 if (url) seenUrls.add(url);
                 deduplicated.push(source);
             } else {
@@ -774,9 +994,67 @@ class NITJSRRAGSystem {
         precomputedEmbedding = null,
         onChunk = null,
         history = [],
-        language = "english"
+        language = "english",
+        userContext = null,
+        conversationSummary = null,
+        chatHistoryManager = null
     ) {
         try {
+            // Step 1: Classify the query
+            const queryType = await this.classifyQuery(question, language);
+            console.log(`[Query Type]: ${queryType}`);
+
+            let response = '';
+
+            // Step 2: Handle based on classification
+            switch (queryType) {
+                case 'GREETING':
+                    response = await this.handleGreeting(language);
+                    if (typeof onChunk === "function") {
+                        onChunk(response);
+                    }
+                    return {
+                        answer: response,
+                        sources: [],
+                        relevantLinks: [],
+                        confidence: 1.0,
+                        language,
+                    };
+
+                // case 'VAGUE':
+                //     response = await this.handleVagueQuery(question, language);
+                //     if (typeof onChunk === "function") {
+                //         onChunk(response);
+                //     }
+                //     return {
+                //         answer: response,
+                //         sources: [],
+                //         relevantLinks: [],
+                //         confidence: 0.3,
+                //         language,
+                //     };
+
+                case 'OFF_TOPIC':
+                    response = await this.handleOffTopic(language);
+                    if (typeof onChunk === "function") {
+                        onChunk(response);
+                    }
+                    return {
+                        answer: response,
+                        sources: [],
+                        relevantLinks: [],
+                        confidence: 0.8,
+                        language,
+                    };
+
+                case 'FOLLOWUP':
+                case 'GSCC_SPECIFIC':
+                default:
+                    // Continue to RAG pipeline below
+                    break;
+            }
+
+            // Step 3: Get embeddings for RAG
             const questionEmbedding =
                 precomputedEmbedding ||
                 (await this.embeddingCache.getQueryEmbedding(
@@ -791,117 +1069,84 @@ class NITJSRRAGSystem {
                 );
             } catch (_) {}
 
-            const relevantDocs = await this.queryDocuments(question, 8, questionEmbedding);
+            // Step 4: Retrieve relevant documents
+            const relevantDocs = await this.queryDocuments(question, 5, questionEmbedding);
 
-            if (relevantDocs.length === 0) {
-                const fallback =
-                    language === "hindi"
-                        ? "मेरे पास उस विषय के बारे में विशिष्ट जानकारी नहीं है। क्या आप कृपया अपना प्रश्न दोबारा बता सकते हैं या प्लेसमेंट, शिक्षाविदों, संकाय, विभागों या अन्य कॉलेज से संबंधित विषयों के बारे में पूछ सकते हैं?"
-                        : "I don't have specific information about that topic in the NIT Jamshedpur data. Could you please rephrase your question or ask about placements, academics, faculty, departments, or other college-related topics?";
+            // Step 5: Check if context is relevant enough
+            // if (!this.isContextRelevant(relevantDocs, 0.4, 1)) {
+            //     const fallbackResponse = language === "hindi"
+            //         ? "मेरे पास इस प्रश्न के लिए आधिकारिक जानकारी उपलब्ध नहीं है।"
+            //         : "I don't have verified information to answer this question.";
+            //
+            //     if (onChunk) onChunk(fallbackResponse);
+            //
+            //     return {
+            //         answer: fallbackResponse,
+            //         sources: [],
+            //         relevantLinks: [],
+            //         confidence: 0.2,
+            //         language,
+            //     };
+            // }
 
-                if (typeof onChunk === "function") {
+            // Step 6: Process conversation history with summarization if needed
+            let processedHistory = history;
+            let summaryText = conversationSummary;
+
+            if (this.summarizer && this.summarizer.needsSummarization(history)) {
+                const result = await this.summarizer.processHistory(history, language, conversationSummary);
+                processedHistory = result.recent;
+                summaryText = result.summary;
+
+                // Save updated summary if available
+                if (result.shouldUpdate && summaryText && chatHistoryManager) {
                     try {
-                        onChunk(fallback);
-                    } catch (_) {}
+                        const sessionId = chatHistoryManager.currentSessionId;
+                        if (sessionId) {
+                            await chatHistoryManager.setSummary(sessionId, summaryText);
+                            console.log(`[Summarizer] Saved updated summary for session`);
+                        }
+                    } catch (err) {
+                        console.warn('[Summarizer] Failed to save summary:', err.message);
+                    }
                 }
-
-                return {
-                    answer: fallback,
-                    sources: [],
-                    relevantLinks: [],
-                    confidence: 0,
-                    language,
-                };
             }
 
-            // Gather links and build context
-            const relevantLinks = this.findRelevantLinks(question, relevantDocs);
-            const context = relevantDocs.map((doc, index) => {
-                const sourceInfo =
-                    doc.metadata.sourceType === "pdf_document"
-                        ? `[PDF Document ${index + 1}: ${doc.metadata.title} (${doc.metadata.pages} pages)]`
-                        : `[Page ${index + 1}: ${doc.metadata.title}]`;
+            // Step 7: Build clean context (NO document listings in context)
+            const context = relevantDocs
+                .slice(0, 5)
+                .map(doc => doc.text)
+                .join("\n\n");
 
-                return `${sourceInfo} ${doc.text}`;
-              }).join("\n\n");
+            // Step 8: Build focused prompt with conversation summary and user context
+            const prompt = this.buildFocusedPrompt(question, context, processedHistory, language, userContext, summaryText);
 
-
-            const linksContext =
-                relevantLinks.length > 0 ? `Relevant Links Available:
-                ${relevantLinks.map((link) => `• ${link.text}: ${link.url} ${link.type === "pdf" ? "(PDF Document)" : "(Web Page)"}`).join("\n")}` : "";
-
-            const languageInstruction = getLanguageInstruction(language);
-
-            const formatConversationHistory = (history, maxTurns = 5) => {
-                if (!Array.isArray(history) || history.length === 0) return "";
-                const recent = history.slice(-maxTurns * 2);
-                const formatted = recent
-                    .map((msg) => {
-                        const role = msg.role === "user" ? "User" : "Assistant";
-                        return `${role}: ${String(msg.content || "").trim()}`;
-                    })
-                    .join("\n");
-                return formatted ? `\n\nPrevious Conversation:\n${formatted}\n` : "";
-            };
-
-            const historySection = formatConversationHistory(history);
-
-            const prompt = `
-            You are an AI assistant specializing in NIT Jamshedpur information. Your role is to provide accurate, helpful, and contextually aware responses based on the provided data and conversation history.
-            ${languageInstruction}
-            
-            ${historySection ? historySection : ""}
-            
-            Knowledge Base Context:
-            ${context || "No relevant context found."}
-            ${linksContext}
-            
-            Current Question: ${question}
-            ${languageInstruction}
-            
-            Instructions:
-            
-            Context Awareness:
-            - Use the conversation history above to understand the full context.
-            - If the question references previous messages (e.g., "tell me more", "what about that", "its placement"), resolve them from the conversation history.
-            - Maintain consistency with earlier responses in this conversation.
-            - Resolve pronouns like "it", "that", "this" using context.
-            
-            Answer Guidelines:
-            - Base your answer primarily on the context from the database.
-            - Provide specific data points (placement %, packages, companies, year, etc.) when available.
-            - If context lacks information, clearly state that.
-            - Be concise, professional, and structured.
-            - When relevant links are available, mention them naturally.
-            - For PDFs, say: "Refer to [Document Name] (PDF): [URL]"
-            - For web pages, say: "See [Page Title]: [URL]"
-            
-            Formatting:
-            - Use clear paragraphs.
-            - Bold key points with **text**.
-            - Use bullet points when appropriate.
-            - Keep tone informative yet conversational.
-            
-            Follow-up Handling:
-            - If user asks "tell me more" or similar, expand on the most recent topic.
-            - If unsure what pronoun refers to, ask for clarification.
-            
-            Answer:
-            `;
-
-            console.log("===================PROMPT==================:", prompt);
+            console.log("===================PROMPT==================:");
+            console.log(prompt);
+            console.log("===========================================");
 
             console.log(
-              `[Chat] Processing ${history.length} messages | Language: ${language}`
+                `[Chat] Processing ${history.length} messages | Language: ${language}`
             );
 
-            const streamResult = await this.chatModel.generateContentStream(prompt);
+            // Step 8: Stream response from LLM
+            const messages = [
+                {
+                    role: "user",
+                    content: prompt,
+                },
+            ];
+
+            const stream = await this.cohere.v2.chatStream({
+                model: this.chatModelName,
+                messages: messages,
+            });
+
             let fullText = "";
 
-            if (streamResult?.stream) {
-                for await (const chunk of streamResult.stream) {
-                    const part =
-                        typeof chunk?.text === "function" ? chunk.text() : chunk?.text;
+            for await (const chunk of stream) {
+                if (chunk.type === "content-delta") {
+                    const part = chunk.delta?.message?.content?.text;
                     if (part) {
                         fullText += part;
                         if (typeof onChunk === "function") {
@@ -913,12 +1158,7 @@ class NITJSRRAGSystem {
                 }
             }
 
-            if (!fullText && streamResult?.response) {
-                try {
-                    fullText = (await streamResult.response).text() || "";
-                } catch (_) {}
-            }
-
+            // Step 9: Prepare sources for response
             const enhancedSources = relevantDocs.map((doc) => ({
                 text: doc.text.substring(0, 200) + "...",
                 source: doc.metadata.source,
@@ -930,16 +1170,6 @@ class NITJSRRAGSystem {
                 category: doc.metadata.category,
             }));
 
-            relevantLinks.forEach((link) => {enhancedSources.push({
-                text: link.context || link.text,
-                source: link.type,
-                sourceType: "link",
-                url: link.url,
-                title: link.text,
-                score: 0.8,
-                category: "link",});
-            });
-
             const filteredSources = this._filterAndDeduplicateSources(
                 enhancedSources,
                 0.5
@@ -948,7 +1178,7 @@ class NITJSRRAGSystem {
             return {
                 answer: fullText,
                 sources: filteredSources,
-                relevantLinks,
+                relevantLinks: [],
                 confidence: relevantDocs.length > 0 ? relevantDocs[0].score : 0,
                 language,
             };
@@ -987,11 +1217,33 @@ class NITJSRRAGSystem {
     }
 
 
-  async clearIndex() {
+    async clearIndex() {
+        if (!this.isInitialized) {
+            await this.initialize();
+        }
+
         console.log("Clearing Pinecone index and link database...");
         try {
-            await this.index.deleteAll();
+            // deleteAll() can throw 404 on some serverless index states if already empty
+            await this.index.deleteAll().catch(err => {
+                if (err.message?.includes('404')) {
+                    console.log("[pinecone] Index already appears to be empty (received 404).");
+                } else {
+                    throw err;
+                }
+            });
+            
             this.linkDatabase.clear();
+
+            // Also clear MongoDB ledger if possible
+            if (this.mongoAvailable()) {
+                console.log("[mongo] Clearing change ledger collections...");
+                await Promise.all([
+                    this.pagesColl.deleteMany({}),
+                    this.chunksColl.deleteMany({})
+                ]);
+            }
+
             console.log("Index and link database cleared successfully");
         } catch (error) {
             console.error("Error clearing index:", error.message);
@@ -1002,4 +1254,4 @@ class NITJSRRAGSystem {
 }
 
 
-export { NITJSRRAGSystem };
+export { JharkhandGovRAGSystem, JharkhandGovRAGSystem as NITJSRRAGSystem };
