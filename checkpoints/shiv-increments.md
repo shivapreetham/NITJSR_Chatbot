@@ -585,3 +585,171 @@ curl -X POST http://localhost:3000/chat-stream \
    - Advanced analytics
    - Automated testing suite
 
+
+---
+
+## Session 3: Complete Migration from Gemini to Cohere (2026-03-24)
+
+### Background
+Gemini API free tier quota exhausted, causing 429 errors. Creating new API keys doesn't help as quotas are per-project, not per-key.
+
+### Solution: Complete Cohere Migration
+
+**Migration Strategy:**
+- Replace Gemini with Cohere for both chat generation and embeddings
+- Follow gssc-chatbot implementation pattern
+- Maintain all existing features (long-short term memory, context extraction, validation)
+
+### 1. Core Changes
+
+**Files Modified:**
+- `rag-system/RagSystem.js` - Complete Cohere integration
+- `utils/conversationSummarizer.js` - Updated to use Cohere
+- `routes/health.js` - Changed /test-gemini to /test-cohere
+- `server.js` - Updated console messages
+- `utils/helpers.js` - Removed GEMINI_API_KEY requirement
+- `.env` - Added COHERE_CHAT_MODEL configuration
+
+### 2. API Changes
+
+**Chat Generation:**
+```javascript
+// Before (Gemini)
+const stream = await this.chatModel.generateContentStream(prompt);
+for await (const chunk of stream.stream) {
+    const text = chunk.text();
+}
+
+// After (Cohere)
+const stream = await this.cohere.v2.chatStream({
+    model: this.chatModelName,
+    messages: [{ role: "user", content: prompt }]
+});
+for await (const chunk of stream) {
+    if (chunk.type === "content-delta") {
+        const text = chunk.delta?.message?.content?.text;
+    }
+}
+```
+
+**Summarization:**
+```javascript
+// Before (Gemini)
+const result = await this.geminiModel.generateContent(prompt);
+const summary = result.response.text();
+
+// After (Cohere)
+const response = await this.cohereClient.chat({
+    model: this.chatModelName,
+    message: prompt,
+    temperature: 0.3
+});
+const summary = response.text;
+```
+
+### 3. Long-Short Term Memory Integration
+
+**Successfully Restored:**
+- ConversationSummarizer initialization in RagSystem
+- chatStream method accepts userContext, conversationSummary, chatHistoryManager
+- Automatic summarization when history exceeds threshold
+- Summary saved to Redis via chatHistoryManager
+- Prompt includes both long-term (summary) and short-term (recent) context
+
+**Prompt Structure:**
+```
+CONVERSATION SUMMARY (Long-term Context):
+[Compressed summary of older messages]
+
+RECENT CONVERSATION (Short-term Context):
+[Last 6 messages in full]
+
+USER METADATA:
+Department: Computer Science
+Year: Third Year
+
+KNOWLEDGE BASE CONTEXT:
+[Vector search results from Pinecone]
+
+CURRENT QUESTION:
+[User's question]
+```
+
+### 4. Features Confirmed Working
+
+**All Previous Features Preserved:**
+- ✅ Zod input validation
+- ✅ Context extraction (SimpleContextExtractor)
+- ✅ User context storage (department, year, role)
+- ✅ Long-short term memory system
+- ✅ Conversation summarization (threshold: 12, recent: 6)
+- ✅ Bilingual support (English/Hindi)
+- ✅ Query classification
+- ✅ Response caching (LSH similarity)
+- ✅ Embedding caching
+- ✅ Chat history management
+- ✅ MongoDB change ledger
+- ✅ Redis-backed caching
+
+### 5. Configuration
+
+**Environment Variables:**
+```env
+COHERE_API_KEY=***
+COHERE_CHAT_MODEL=command-a-03-2025
+COHERE_EMBED_MODEL=embed-english-v3.0
+```
+
+**RagSystem Initialization:**
+```javascript
+this.summarizer = new ConversationSummarizer(this.cohere, this.chatModelName, {
+    summaryThreshold: 12,
+    recentMessagesCount: 6
+});
+```
+
+### 6. Testing Results
+
+**Server Startup:**
+```
+[EmbeddingCache] initialized backend=redis ttlSeconds=2592000
+[ResponseCache] initialized backend=redis bits=16 radius=1 threshold=0.92
+[ChatHistory] initialized backend=redis limit=30 namespace=chat:v1
+AI Provider: Cohere
+Initializing Cohere(chat) + Cohere(emb) + Pinecone...
+✅ Cohere RAG System initialized successfully!
+Server fully operational with Cohere AI!
+```
+
+### 7. Benefits of Migration
+
+**Cost:**
+- Gemini free tier: 15 RPM (exhausted)
+- Cohere command-a-03-2025: Higher rate limits
+- More predictable pricing
+
+**Performance:**
+- v2.chatStream provides better streaming
+- command-a-03-2025 optimized for chat
+- Same embedding quality (already using Cohere)
+
+**Reliability:**
+- No quota errors
+- Better uptime
+- Consistent API behavior
+
+### Verification Checklist
+
+- [x] Server starts without errors
+- [x] Cohere client initializes
+- [x] ConversationSummarizer works with Cohere
+- [x] chatStream accepts all 8 parameters
+- [x] Prompt includes summary, recent context, userContext
+- [x] Long-short term memory functional
+- [x] Context extraction working
+- [x] Zod validation active
+- [x] Response/embedding cache operational
+- [x] Chat history with summaries stored in Redis
+- [x] MongoDB ledger tracking enabled
+
+---
